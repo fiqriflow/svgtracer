@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   DEFAULT_SETTINGS,
   formatBytes,
@@ -87,16 +87,18 @@ export default function Tracer() {
     };
   }, [source, settings]);
 
-  const svgUrl = useMemo(() => {
-    if (!result) return "";
-    return URL.createObjectURL(new Blob([result.svg], { type: "image/svg+xml" }));
-  }, [result]);
+  const [svgUrl, setSvgUrl] = useState("");
 
+  // Buat & bersihkan URL dalam satu effect (aman untuk React StrictMode)
   useEffect(() => {
-    return () => {
-      if (svgUrl) URL.revokeObjectURL(svgUrl);
-    };
-  }, [svgUrl]);
+    if (!result) {
+      setSvgUrl("");
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([result.svg], { type: "image/svg+xml" }));
+    setSvgUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [result]);
 
   const download = () => {
     if (!svgUrl) return;
