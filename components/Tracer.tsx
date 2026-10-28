@@ -4,15 +4,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DEFAULT_SETTINGS,
   formatBytes,
-  loadImageData,
-  traceImageData,
+  prepareUpload,
+  traceImage,
   type Mode,
   type TraceResult,
   type TraceSettings,
 } from "@/lib/trace";
 
 type Slider = {
-  key: "colors" | "detail" | "smooth" | "threshold" | "speckles";
+  key: "colors" | "smooth" | "threshold" | "speckles";
   label: string;
   hint: string;
   min: number;
@@ -21,16 +21,15 @@ type Slider = {
 };
 
 const SLIDERS: Slider[] = [
-  { key: "colors", label: "Jumlah warna", hint: "Lebih banyak = lebih mirip, file lebih berat", min: 2, max: 32, modes: ["color"] },
+  { key: "colors", label: "Jumlah warna", hint: "Lebih banyak = lebih mirip, file lebih berat", min: 4, max: 64, modes: ["color"] },
   { key: "threshold", label: "Batas gelap", hint: "Piksel lebih gelap dari ini jadi hitam", min: 20, max: 235, modes: ["bw"] },
-  { key: "detail", label: "Detail", hint: "Kurva lebih presisi, path lebih banyak", min: 1, max: 10, modes: ["color", "bw"] },
-  { key: "smooth", label: "Haluskan tepi", hint: "Blur ringan sebelum tracing", min: 0, max: 5, modes: ["color", "bw"] },
+  { key: "smooth", label: "Haluskan kurva", hint: "0 = persis, makin tinggi makin halus dan ringan", min: 0, max: 5, modes: ["color", "bw"] },
   { key: "speckles", label: "Buang bintik", hint: "Hapus bentuk kecil yang tidak perlu", min: 0, max: 60, modes: ["color", "bw"] },
 ];
 
 export default function Tracer() {
   const [fileName, setFileName] = useState<string>("");
-  const [source, setSource] = useState<ImageData | null>(null);
+  const [source, setSource] = useState<Blob | null>(null);
   const [originalUrl, setOriginalUrl] = useState<string>("");
   const [settings, setSettings] = useState<TraceSettings>(DEFAULT_SETTINGS);
   const [result, setResult] = useState<TraceResult | null>(null);
@@ -50,7 +49,7 @@ export default function Tracer() {
     setError("");
     setResult(null);
     try {
-      const data = await loadImageData(file);
+      const data = await prepareUpload(file);
       setSource(data);
       setFileName(file.name);
       setOriginalUrl((old) => {
@@ -66,21 +65,26 @@ export default function Tracer() {
   useEffect(() => {
     if (!source) return;
     const id = ++runId.current;
+    const ctrl = new AbortController();
     setBusy(true);
     const timer = setTimeout(async () => {
       try {
-        const r = await traceImageData(source, settings);
+        const r = await traceImage(source, settings, ctrl.signal);
         if (id === runId.current) {
           setResult(r);
           setError("");
         }
-      } catch {
-        if (id === runId.current) setError("Tracing gagal. Coba kurangi detail atau pakai gambar lebih kecil.");
+      } catch (e) {
+        if (id === runId.current && !ctrl.signal.aborted)
+          setError(e instanceof Error ? e.message : "Tracing gagal. Coba gambar lebih kecil.");
       } finally {
         if (id === runId.current) setBusy(false);
       }
     }, 250);
-    return () => clearTimeout(timer);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
   }, [source, settings]);
 
   const svgUrl = useMemo(() => {
@@ -104,9 +108,13 @@ export default function Tracer() {
 
   const copySvg = async () => {
     if (!result) return;
-    await navigator.clipboard.writeText(result.svg);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+    try {
+      await navigator.clipboard.writeText(result.svg);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setError("Gagal menyalin. Pakai tombol Unduh SVG.");
+    }
   };
 
   const set = <K extends keyof TraceSettings>(key: K, value: TraceSettings[K]) =>

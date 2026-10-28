@@ -2,117 +2,67 @@ export type Mode = "color" | "bw";
 
 export type TraceSettings = {
   mode: Mode;
-  /** Jumlah warna (mode warna) */
+  /** Jumlah warna maksimum (mode warna) */
   colors: number;
-  /** 1 (kasar) - 10 (sangat detail) */
-  detail: number;
-  /** 0 - 5, blur sebelum tracing untuk menghaluskan tepi */
-  smooth: number;
-  /** 0 - 255, batas gelap/terang (mode hitam-putih) */
-  threshold: number;
-  /** Buang bintik kecil, makin besar makin banyak yang dibuang */
+  /** Buang bintik kecil (px) */
   speckles: number;
+  /** Haluskan kurva, 0 = mati */
+  smooth: number;
+  /** Batas gelap 0-255 (mode hitam-putih) */
+  threshold: number;
 };
 
+/** Preset awal: cocok untuk ilustrasi/maskot flat, minim gradasi */
 export const DEFAULT_SETTINGS: TraceSettings = {
   mode: "color",
-  colors: 8,
-  detail: 6,
-  smooth: 0,
-  threshold: 128,
+  colors: 64,
   speckles: 8,
+  smooth: 1.5,
+  threshold: 128,
 };
 
-export type TraceResult = {
-  svg: string;
-  bytes: number;
-  paths: number;
-};
+export type TraceResult = { svg: string; bytes: number; paths: number };
 
-/** Sisi terpanjang gambar saat tracing. Lebih besar = lebih lambat. */
-export const MAX_SIDE = 1400;
+/** Sisi terpanjang gambar yang dikirim ke server (batas body Vercel 4,5 MB) */
+export const MAX_SIDE = 2000;
+const MAX_UPLOAD = 4 * 1024 * 1024;
 
-export async function loadImageData(file: File): Promise<ImageData> {
+/** Kirim file apa adanya; kalau terlalu besar, kecilkan dulu lewat canvas. */
+export async function prepareUpload(file: File): Promise<Blob> {
   const bitmap = await createImageBitmap(file);
-  const ratio = Math.min(1, MAX_SIDE / Math.max(bitmap.width, bitmap.height));
-  const w = Math.max(1, Math.round(bitmap.width * ratio));
-  const h = Math.max(1, Math.round(bitmap.height * ratio));
+  const long = Math.max(bitmap.width, bitmap.height);
+  if (file.size <= MAX_UPLOAD && long <= MAX_SIDE) {
+    bitmap.close();
+    return file;
+  }
+  const ratio = Math.min(1, MAX_SIDE / long);
   const canvas = document.createElement("canvas");
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  canvas.width = Math.max(1, Math.round(bitmap.width * ratio));
+  canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
+  const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas tidak tersedia di browser ini.");
-  ctx.drawImage(bitmap, 0, 0, w, h);
+  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
   bitmap.close();
-  return ctx.getImageData(0, 0, w, h);
+  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
+  if (!blob) throw new Error("Gagal memproses gambar.");
+  return blob;
 }
 
-function toBlackWhite(src: ImageData, threshold: number): ImageData {
-  const out = new ImageData(src.width, src.height);
-  const s = src.data;
-  const d = out.data;
-  for (let i = 0; i < s.length; i += 4) {
-    const alpha = s[i + 3];
-    const lum = 0.299 * s[i] + 0.587 * s[i + 1] + 0.114 * s[i + 2];
-    const dark = alpha >= 128 && lum < threshold;
-    const v = dark ? 0 : 255;
-    d[i] = v;
-    d[i + 1] = v;
-    d[i + 2] = v;
-    d[i + 3] = 255;
-  }
-  return out;
-}
-
-export async function traceImageData(
-  source: ImageData,
+export async function traceImage(
+  image: Blob,
   s: TraceSettings,
+  signal?: AbortSignal,
 ): Promise<TraceResult> {
-  const mod = await import("imagetracerjs");
-  const ImageTracer = mod.default;
-
-  // detail 1..10 -> toleransi kurva 3..0.57 (makin kecil makin presisi)
-  const tol = 3 - (s.detail - 1) * 0.27;
-
-  const base = {
-    ltres: tol,
-    qtres: tol,
-    pathomit: s.speckles,
-    blurradius: s.smooth,
-    blurdelta: 20,
-    roundcoords: 1,
-    viewbox: true,
-    desc: false,
-    strokewidth: 1,
-  };
-
-  let svg: string;
-  if (s.mode === "bw") {
-    svg = ImageTracer.imagedataToSVG(toBlackWhite(source, s.threshold), {
-      ...base,
-      numberofcolors: 2,
-      colorsampling: 0,
-      pal: [
-        { r: 0, g: 0, b: 0, a: 255 },
-        { r: 255, g: 255, b: 255, a: 255 },
-      ],
-    });
-    // Buang bidang putih supaya latar SVG transparan
-    svg = svg.replace(/<path[^>]*fill="rgb\(255,255,255\)"[^>]*\/>/g, "");
-  } else {
-    svg = ImageTracer.imagedataToSVG(source, {
-      ...base,
-      numberofcolors: s.colors,
-      colorsampling: 2,
-      colorquantcycles: 3,
-    });
-    // Buang bidang transparan
-    svg = svg.replace(/<path[^>]*opacity="0"[^>]*\/>/g, "");
+  const form = new FormData();
+  form.append("file", image, "image.png");
+  form.append("settings", JSON.stringify(s));
+  const res = await fetch("/api/trace", { method: "POST", body: form, signal });
+  if (!res.ok) {
+    const msg = await res.text().catch(() => "");
+    throw new Error(msg || `Tracing gagal (${res.status})`);
   }
-
-  const paths = (svg.match(/<path/g) ?? []).length;
-  const bytes = new Blob([svg]).size;
-  return { svg, bytes, paths };
+  const svg = await res.text();
+  return { svg, bytes: new Blob([svg]).size, paths: (svg.match(/<path/g) ?? []).length };
 }
 
 export function formatBytes(n: number): string {
