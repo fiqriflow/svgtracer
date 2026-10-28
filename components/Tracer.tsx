@@ -37,6 +37,8 @@ export default function Tracer() {
   const [error, setError] = useState<string>("");
   const [dragging, setDragging] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [split, setSplit] = useState(50);
+  const [ratio, setRatio] = useState(1);
   const inputRef = useRef<HTMLInputElement>(null);
   const runId = useRef(0);
 
@@ -60,6 +62,16 @@ export default function Tracer() {
       setError("Gambar tidak bisa dibaca. Coba file PNG lain.");
     }
   }, []);
+
+  // Tempel gambar dengan Ctrl+V
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const f = Array.from(e.clipboardData?.files ?? []).find((x) => x.type.startsWith("image/"));
+      if (f) handleFile(f);
+    };
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [handleFile]);
 
   // Tracing otomatis (ditunda sebentar saat slider digeser)
   useEffect(() => {
@@ -122,158 +134,182 @@ export default function Tracer() {
   const set = <K extends keyof TraceSettings>(key: K, value: TraceSettings[K]) =>
     setSettings((s) => ({ ...s, [key]: value }));
 
+  const pickFile = () => inputRef.current?.click();
+
   return (
-    <div className="grid flex-1 gap-6 lg:grid-cols-[320px_1fr]">
-      {/* Kontrol */}
-      <aside className="flex flex-col gap-5 rounded-lg border border-line bg-panel p-4">
-        <div>
-          <p className="mb-2 text-sm font-medium">Mode</p>
-          <div className="grid grid-cols-2 gap-1 rounded-md bg-paper p-1" role="group" aria-label="Mode tracing">
-            {([
-              ["color", "Warna"],
-              ["bw", "Hitam-putih"],
-            ] as const).map(([value, label]) => (
-              <button
-                key={value}
-                type="button"
-                aria-pressed={settings.mode === value}
-                onClick={() => set("mode", value)}
-                className={`rounded px-3 py-1.5 text-sm transition-colors ${
-                  settings.mode === value ? "bg-ink text-white" : "text-mute hover:text-ink"
-                }`}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
+    <div className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-4">
+      {!source ? (
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            handleFile(e.dataTransfer.files[0]);
+          }}
+          onClick={pickFile}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && pickFile()}
+          className={`flex min-h-[55vh] cursor-pointer flex-col items-center justify-center gap-3 rounded-2xl border-2 border-dashed p-8 text-center transition-colors ${
+            dragging ? "border-anchor bg-white" : "border-line bg-panel hover:border-ink"
+          }`}
+        >
+          <p className="text-xl font-semibold">Seret PNG ke sini</p>
+          <p className="text-sm text-mute">atau klik untuk memilih file, atau tempel dengan Ctrl+V</p>
+          <p className="text-xs text-mute">Logo, ikon, dan ilustrasi flat memberi hasil terbaik. Maks 4 MB.</p>
         </div>
-
-        {SLIDERS.filter((sl) => sl.modes.includes(settings.mode)).map((sl) => (
-          <div key={sl.key}>
-            <label htmlFor={sl.key} className="flex items-baseline justify-between text-sm font-medium">
-              <span>{sl.label}</span>
-              <span className="tabular-nums text-mute">{settings[sl.key]}</span>
-            </label>
-            <input
-              id={sl.key}
-              type="range"
-              min={sl.min}
-              max={sl.max}
-              value={settings[sl.key]}
-              disabled={!source}
-              onChange={(e) => set(sl.key, Number(e.target.value))}
-              className="mt-1 w-full disabled:opacity-40"
-            />
-            <p className="text-xs text-mute">{sl.hint}</p>
+      ) : (
+        <>
+          {/* Perbandingan sebelum/sesudah */}
+          <div className="rounded-2xl border border-line bg-panel p-3">
+            <div
+              className="checker relative mx-auto w-full select-none overflow-hidden rounded-xl"
+              style={{ aspectRatio: String(ratio), maxWidth: `min(100%, calc(70vh * ${ratio}))` }}
+            >
+              {svgUrl && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={svgUrl} alt="Hasil SVG" className="absolute inset-0 h-full w-full object-contain" />
+              )}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={originalUrl}
+                alt="PNG asli"
+                onLoad={(e) => setRatio(e.currentTarget.naturalWidth / e.currentTarget.naturalHeight || 1)}
+                className="absolute inset-0 h-full w-full object-contain"
+                style={{ clipPath: svgUrl ? `inset(0 ${100 - split}% 0 0)` : undefined }}
+              />
+              {svgUrl && (
+                <>
+                  <div
+                    className="pointer-events-none absolute inset-y-0 w-0.5 bg-anchor"
+                    style={{ left: `${split}%` }}
+                  />
+                  <span className="pointer-events-none absolute left-2 top-2 rounded bg-ink/70 px-2 py-0.5 text-xs text-white">
+                    PNG
+                  </span>
+                  <span className="pointer-events-none absolute right-2 top-2 rounded bg-ink/70 px-2 py-0.5 text-xs text-white">
+                    SVG
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={split}
+                    onChange={(e) => setSplit(Number(e.target.value))}
+                    aria-label="Geser untuk membandingkan PNG dan SVG"
+                    className="absolute inset-0 h-full w-full cursor-ew-resize opacity-0"
+                  />
+                </>
+              )}
+              {busy && (
+                <div
+                  role="status"
+                  className="absolute inset-0 flex items-center justify-center bg-white/60 text-sm font-medium"
+                >
+                  Memproses…
+                </div>
+              )}
+            </div>
           </div>
-        ))}
 
-        <div className="mt-auto flex flex-col gap-2 border-t border-line pt-4">
-          <button
-            type="button"
-            onClick={download}
-            disabled={!result || busy}
-            className="rounded-md bg-anchor px-4 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-          >
-            Unduh SVG
-          </button>
-          <button
-            type="button"
-            onClick={copySvg}
-            disabled={!result || busy}
-            className="rounded-md border border-line px-4 py-2 text-sm transition-colors hover:border-ink disabled:opacity-40"
-          >
-            {copied ? "Tersalin" : "Salin kode SVG"}
-          </button>
-          {result && (
-            <p className="text-xs text-mute">
-              {formatBytes(result.bytes)}, {result.paths} path
-            </p>
-          )}
-        </div>
-      </aside>
-
-      {/* Area kerja */}
-      <section className="flex min-h-[60vh] flex-col gap-3">
-        {!source ? (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragging(false);
-              handleFile(e.dataTransfer.files[0]);
-            }}
-            className={`flex flex-1 flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed p-8 text-center transition-colors ${
-              dragging ? "border-anchor bg-white" : "border-line bg-panel"
-            }`}
-          >
-            <p className="text-lg font-medium">Seret PNG ke sini</p>
-            <p className="text-sm text-mute">Logo, ikon, dan ilustrasi flat memberi hasil terbaik.</p>
+          {/* Aksi utama */}
+          <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
-              onClick={() => inputRef.current?.click()}
-              className="rounded-md bg-ink px-4 py-2 text-sm font-medium text-white"
+              onClick={download}
+              disabled={!result || busy}
+              className="rounded-xl bg-anchor px-8 py-3 text-base font-semibold text-white transition-opacity disabled:opacity-40"
             >
-              Pilih file
+              Unduh SVG
             </button>
+            <button
+              type="button"
+              onClick={copySvg}
+              disabled={!result || busy}
+              className="rounded-xl border border-line px-4 py-3 text-sm transition-colors hover:border-ink disabled:opacity-40"
+            >
+              {copied ? "Tersalin" : "Salin kode"}
+            </button>
+            <button
+              type="button"
+              onClick={pickFile}
+              className="rounded-xl border border-line px-4 py-3 text-sm transition-colors hover:border-ink"
+            >
+              Ganti gambar
+            </button>
+            <p className="ml-auto truncate text-xs text-mute">
+              {fileName}
+              {result && ` · ${formatBytes(result.bytes)} · ${result.paths} path`}
+            </p>
           </div>
-        ) : (
-          <>
-            <div className="flex items-center justify-between gap-3 text-sm">
-              <p className="truncate text-mute">{fileName}</p>
-              <button
-                type="button"
-                onClick={() => inputRef.current?.click()}
-                className="shrink-0 rounded-md border border-line px-3 py-1.5 transition-colors hover:border-ink"
-              >
-                Ganti gambar
-              </button>
-            </div>
-            <div className="grid flex-1 gap-3 md:grid-cols-2">
-              <figure className="flex flex-col gap-2">
-                <figcaption className="text-sm font-medium">PNG asli</figcaption>
-                <div className="checker flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-line p-3">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img src={originalUrl} alt="PNG asli" className="max-h-[65vh] max-w-full object-contain" />
+
+          {/* Pengaturan lanjutan */}
+          <details className="rounded-xl border border-line bg-panel p-4">
+            <summary className="cursor-pointer text-sm font-medium">Pengaturan lanjutan</summary>
+            <div className="mt-4 grid gap-5 sm:grid-cols-2">
+              <div className="sm:col-span-2">
+                <div className="grid max-w-xs grid-cols-2 gap-1 rounded-md bg-paper p-1" role="group" aria-label="Mode tracing">
+                  {([
+                    ["color", "Warna"],
+                    ["bw", "Hitam-putih"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      aria-pressed={settings.mode === value}
+                      onClick={() => set("mode", value)}
+                      className={`rounded px-3 py-1.5 text-sm transition-colors ${
+                        settings.mode === value ? "bg-ink text-white" : "text-mute hover:text-ink"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-              </figure>
-              <figure className="flex flex-col gap-2">
-                <figcaption className="flex items-center justify-between text-sm font-medium">
-                  <span>Hasil SVG</span>
-                  {busy && <span className="text-xs font-normal text-mute" role="status">Memproses…</span>}
-                </figcaption>
-                <div className="checker flex flex-1 items-center justify-center overflow-hidden rounded-lg border border-line p-3">
-                  {svgUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={svgUrl} alt="Hasil SVG" className="max-h-[65vh] max-w-full object-contain" />
-                  ) : (
-                    <p className="text-sm text-mute">Menunggu hasil…</p>
-                  )}
+              </div>
+              {SLIDERS.filter((sl) => sl.modes.includes(settings.mode)).map((sl) => (
+                <div key={sl.key}>
+                  <label htmlFor={sl.key} className="flex items-baseline justify-between text-sm font-medium">
+                    <span>{sl.label}</span>
+                    <span className="tabular-nums text-mute">{settings[sl.key]}</span>
+                  </label>
+                  <input
+                    id={sl.key}
+                    type="range"
+                    min={sl.min}
+                    max={sl.max}
+                    step={sl.key === "smooth" ? 0.5 : 1}
+                    value={settings[sl.key]}
+                    onChange={(e) => set(sl.key, Number(e.target.value))}
+                    className="mt-1 w-full"
+                  />
+                  <p className="text-xs text-mute">{sl.hint}</p>
                 </div>
-              </figure>
+              ))}
             </div>
-          </>
-        )}
-        {error && (
-          <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">
-            {error}
-          </p>
-        )}
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/png,image/*"
-          className="sr-only"
-          onChange={(e) => {
-            handleFile(e.target.files?.[0]);
-            e.target.value = "";
-          }}
-        />
-      </section>
+          </details>
+        </>
+      )}
+
+      {error && (
+        <p role="alert" className="rounded-md border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800">
+          {error}
+        </p>
+      )}
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/png,image/*"
+        className="sr-only"
+        onChange={(e) => {
+          handleFile(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
     </div>
   );
 }
