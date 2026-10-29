@@ -195,6 +195,70 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
     if (cD[key] <= PURE_D2 && !(channels === 4 && rgba[o + 3] < 128)) pure[i] = 1;
   }
 
+  // Pass 1.5: buang "pinggiran" anti-alias. Piksel di tepi dua warna besar (mis. bingkai gelap vs
+  // cokelat) kadang kebetulan dekat warna palet ketiga (hidung, telinga) lalu dianggap murni dan
+  // membentuk serpihan tipis di sepanjang tepi. Bila warna piksel terletak pada garis antara dua
+  // kelas murni lain di sekitarnya (5x5), perlakukan sebagai campuran, bukan warna murni.
+  const fringe = new Uint8Array(n);
+  {
+    const base = pure.slice();
+    const c2 = new Int32Array(5);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (!base[i]) continue;
+        const c = a[i];
+        if (
+          x > 0 && x < width - 1 && y > 0 && y < height - 1 &&
+          a[i - 1] === c && a[i + 1] === c && a[i - width] === c && a[i + width] === c
+        ) continue; // interior
+        let m2 = 0;
+        for (let dy = -2; dy <= 2; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= height) continue;
+          for (let dx = -2; dx <= 2; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= width) continue;
+            const j = yy * width + xx;
+            if (!base[j]) continue;
+            const cj = a[j];
+            if (cj === c) continue;
+            let seen = false;
+            for (let k = 0; k < m2; k++) if (c2[k] === cj) seen = true;
+            if (!seen && m2 < 5) c2[m2++] = cj;
+          }
+        }
+        if (m2 < 2) continue;
+        const o = i * channels;
+        const r = rgba[o];
+        const g = rgba[o + 1];
+        const bl = rgba[o + 2];
+        let hit = false;
+        for (let u = 0; u < m2 && !hit; u++) {
+          for (let v = u + 1; v < m2 && !hit; v++) {
+            const A = c2[u];
+            const B = c2[v];
+            const vx = pr[B] - pr[A];
+            const vy = pg[B] - pg[A];
+            const vz = pb[B] - pb[A];
+            const vv = vx * vx + vy * vy + vz * vz;
+            if (vv === 0) continue;
+            const t = ((r - pr[A]) * vx + (g - pg[A]) * vy + (bl - pb[A]) * vz) / vv;
+            if (t < 0.08 || t > 0.92) continue;
+            const ex = r - (pr[A] + t * vx);
+            const ey = g - (pg[A] + t * vy);
+            const ez = bl - (pb[A] + t * vz);
+            if (ex * ex + ey * ey + ez * ez <= 144) hit = true;
+          }
+        }
+        if (hit) {
+          pure[i] = 0;
+          fringe[i] = 1;
+        }
+      }
+    }
+  }
+
   // Pass 2: piksel tepi -> pasangan terbaik dari kelas piksel murni di sekitarnya
   const cls = new Int32Array(6);
   for (let y = 0; y < height; y++) {
@@ -218,6 +282,7 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
             const j = yy * width + xx;
             if (!pure[j]) continue;
             const c = a[j];
+            if (fringe[i] && c === a[i]) continue; // pinggiran: jangan berpasangan dengan kelasnya sendiri
             let seen = false;
             for (let k = 0; k < m; k++) if (cls[k] === c) seen = true;
             if (!seen && m < 6) cls[m++] = c;

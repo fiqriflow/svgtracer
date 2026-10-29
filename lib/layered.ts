@@ -65,6 +65,50 @@ function dilate(mask: Uint8Array, W: number, H: number, r: number): Uint8Array {
   return out;
 }
 
+/**
+ * Tambahkan ke `near` semua "pulau" piksel berperingkat > r yang hampir seluruh tepinya
+ * berbatasan dengan peringkat r (mis. highlight putih di dalam mata): pulau itu harus
+ * ikut terisi di lapisan r supaya mata tidak berlubang.
+ */
+function addEnclosedIslands(rk: Int16Array, W: number, H: number, r: number, near: Uint8Array): void {
+  const N = W * H;
+  const seen = new Uint8Array(N);
+  const queue = new Int32Array(N);
+  for (let s = 0; s < N; s++) {
+    if (seen[s] || rk[s] <= r) continue;
+    let n = 0;
+    let head = 0;
+    let border = 0;
+    let same = 0;
+    queue[n++] = s;
+    seen[s] = 1;
+    while (head < n) {
+      const i = queue[head++];
+      const x = i % W;
+      const y = (i - x) / W;
+      for (let d = 0; d < 4; d++) {
+        const nx = d === 0 ? x - 1 : d === 1 ? x + 1 : x;
+        const ny = d === 2 ? y - 1 : d === 3 ? y + 1 : y;
+        if (nx < 0 || ny < 0 || nx >= W || ny >= H) {
+          border++;
+          continue;
+        }
+        const j = ny * W + nx;
+        if (rk[j] > r) {
+          if (!seen[j]) {
+            seen[j] = 1;
+            queue[n++] = j;
+          }
+        } else {
+          border++;
+          if (rk[j] === r) same++;
+        }
+      }
+    }
+    if (border > 0 && same / border >= 0.9) for (let k = 0; k < n; k++) near[queue[k]] = 1;
+  }
+}
+
 const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
 
 /**
@@ -195,6 +239,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       const own = new Uint8Array(N0);
       for (let i = 0; i < N0; i++) if (rk[i] === r) own[i] = 1;
       near = dilate(own, W0, H0, collar);
+      addEnclosedIslands(rk, W0, H0, r, near);
     }
     let count = 0;
     for (let i = 0; i < N0; i++) {

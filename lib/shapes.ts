@@ -15,8 +15,8 @@ type Opts = {
 };
 
 export function snapEllipses(buf: Uint8Array, w: number, h: number, o: Opts): Ellipse[] {
-  const meanTol = o.meanTol ?? 0.007;
-  const maxTol = o.maxTol ?? 0.02;
+  const meanTol = o.meanTol ?? 0.012;
+  const maxTol = o.maxTol ?? 0.04;
   const N = w * h;
   const seen = new Uint8Array(N);
   const queue = new Int32Array(N);
@@ -71,7 +71,7 @@ export function snapEllipses(buf: Uint8Array, w: number, h: number, o: Opts): El
     if (l2 <= 0) continue;
     let rx = 2 * Math.sqrt(l1);
     let ry = 2 * Math.sqrt(l2);
-    if (ry < 3 || rx / ry > 8) continue;
+    if (ry < 8 || rx / ry > 4) continue; // jangan ubah serpihan tipis/kecil jadi elips
     const th = 0.5 * Math.atan2(2 * ixy, ixx - iyy);
     const cos = Math.cos(th);
     const sin = Math.sin(th);
@@ -100,7 +100,7 @@ export function snapEllipses(buf: Uint8Array, w: number, h: number, o: Opts): El
     }
     // Bentuk kecil: beri toleransi minimum dalam px (noise rasterisasi ~ +-1 px)
     const rr = Math.sqrt(rx * ry);
-    if (!nb || sum / nb > Math.max(meanTol, 0.45 / rr) || max > Math.max(maxTol, 1.1 / rr)) continue;
+    if (!nb || sum / nb > Math.max(meanTol, 0.6 / rr) || max > Math.max(maxTol, 1.6 / rr)) continue;
 
     let rot = (th * 180) / Math.PI;
     if (rx / ry < 1 + Math.max(0.03, 1.2 / rr)) {
