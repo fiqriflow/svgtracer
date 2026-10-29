@@ -8,7 +8,7 @@ type Pt = { x: number; y: number };
 type Seg = { c: boolean; p0: Pt; p1: Pt; p2: Pt; p3: Pt };
 
 const SAMPLES = 8; // titik sampel per segmen asal
-const MAX_RUN = 24; // maks segmen asal yang digabung jadi satu kurva
+const MAX_RUN = 80; // maks segmen asal yang digabung jadi satu kurva
 const COS_SMOOTH = Math.cos((20 * Math.PI) / 180); // sambungan <= 20 derajat dianggap mulus
 
 const sub = (a: Pt, b: Pt): Pt => ({ x: a.x - b.x, y: a.y - b.y });
@@ -701,7 +701,9 @@ function snapLines(segs: Seg[], tol: number): Seg[] | null {
 }
 
 /** Tahap: rapikan garis/sudut dulu, lalu gabung kurva sisanya, lalu rapikan lagi */
-function simplifySub(segs: Seg[], tol: number): Seg[] {
+function simplifySub(segs: Seg[], tol: number, geometric: boolean): Seg[] {
+  // Ilustrasi organik: hanya gabung kurva mulus (tanpa memaksa garis/poligon yang bikin faset)
+  if (!geometric) return mergeCurves(segs, tol);
   const snapped = snapLines(segs, tol);
   if (snapped) return snapped;
   return straighten(mergeCurves(straighten(segs, tol), tol), tol);
@@ -770,14 +772,14 @@ function build(subs: Seg[][]): string {
 }
 
 /** Sederhanakan atribut d="..." dalam tag <path> hasil Potrace. tol dalam satuan koordinat path. */
-export function simplifyTag(tag: string, tol: number): string {
+export function simplifyTag(tag: string, tol: number, geometric = false): string {
   if (!(tol > 0)) return tag;
   const m = tag.match(/ d="([^"]*)"/);
   if (!m) return tag;
   try {
     const subs = parse(m[1]);
     if (!subs) return tag;
-    const d = build(subs.map((s) => simplifySub(s, tol)));
+    const d = build(subs.map((s) => simplifySub(s, tol, geometric)));
     return tag.replace(m[0], ` d="${d}"`);
   } catch {
     return tag;

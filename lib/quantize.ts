@@ -45,8 +45,8 @@ export function buildPalette(rgba: Uint8Array, channels: number, k: number): num
     let best = -1;
     let bestScore = 0;
     boxes.forEach((b, i) => {
-      // jangan pecah kotak yang warnanya sudah rapat (>= 3 satuan 5-bit ~ 24 level)
-      if (b.bins.length < 2 || b.range < 3) return;
+      // jangan pecah kotak yang warnanya sudah rapat (< 2 satuan 5-bit ~ 16 level)
+      if (b.bins.length < 2 || b.range < 2) return;
       const score = Math.sqrt(b.pop) * b.range;
       if (score > bestScore) {
         bestScore = score;
@@ -162,7 +162,7 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
   const b = new Int16Array(n);
   const w = new Uint8Array(n);
   const pure = new Uint8Array(n);
-  const PURE_D2 = 64; // piksel dianggap murni bila <= ~8 level dari warna palet
+  const PURE_D2 = 196; // piksel dianggap murni bila <= ~14 level dari warna palet
 
   // Pass 1: warna palet terdekat (cache 7-bit per kanal)
   const SZ = 1 << 21;
@@ -206,19 +206,24 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
       const g = rgba[o + 1];
       const bl = rgba[o + 2];
       let m = 0;
-      for (let dy = -2; dy <= 2; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= height) continue;
-        for (let dx = -2; dx <= 2; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= width) continue;
-          const j = yy * width + xx;
-          if (!pure[j]) continue;
-          const c = a[j];
-          let seen = false;
-          for (let k = 0; k < m; k++) if (cls[k] === c) seen = true;
-          if (!seen && m < 6) cls[m++] = c;
+      // Cari kelas piksel murni di sekitar; perbesar jendela (2 -> 4 -> 7) sampai ada >= 2 kelas
+      for (const R of [2, 4, 7]) {
+        m = 0;
+        for (let dy = -R; dy <= R; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= height) continue;
+          for (let dx = -R; dx <= R; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= width) continue;
+            const j = yy * width + xx;
+            if (!pure[j]) continue;
+            const c = a[j];
+            let seen = false;
+            for (let k = 0; k < m; k++) if (cls[k] === c) seen = true;
+            if (!seen && m < 6) cls[m++] = c;
+          }
         }
+        if (m >= 2) break;
       }
       let bestA = a[i];
       let bestB = a[i];
@@ -252,9 +257,24 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
         }
       }
       if (bestPerp === Infinity) {
-        // Tidak ada pasangan lokal yang cocok: pakai warna palet terdekat saja
+        // Tidak ada pasangan lokal: pakai palet global bila cukup dekat (<= ~30 level),
+        // kalau tidak, kelas murni lokal terdekat
+        let bd2 = Infinity;
         bestA = a[i];
-        bestB = a[i];
+        const gd = (r - pr[a[i]]) ** 2 + (g - pg[a[i]]) ** 2 + (bl - pb[a[i]]) ** 2;
+        if (gd <= 900) m = 0;
+        for (let u = 0; u < m; u++) {
+          const A = cls[u];
+          const dr = r - pr[A];
+          const dg = g - pg[A];
+          const db = bl - pb[A];
+          const d = dr * dr + dg * dg + db * db;
+          if (d < bd2) {
+            bd2 = d;
+            bestA = A;
+          }
+        }
+        bestB = bestA;
         bestW = 0;
       }
       a[i] = bestA;
@@ -263,4 +283,46 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
     }
   }
   return { a, b, w };
+}
+
+/**
+ * Haluskan palet ke rata-rata piksel ASLI (Lloyd/k-means 1-3 putaran).
+ * Palet median-cut berasal dari bin 5-bit (galat hingga +-4 level); di sini tiap warna
+ * dihitung ulang dari piksel interior (jarak <= maxD dari warnanya) sehingga tepat.
+ */
+export function refinePalette(rgba: Uint8Array, channels: number, palette: number[], iters = 3, maxD = 28): number[] {
+  let pal = palette.slice();
+  const maxD2 = maxD * maxD;
+  for (let it = 0; it < iters; it++) {
+    const ids = assignPalette(rgba, channels, pal);
+    const sr = new Float64Array(pal.length);
+    const sg = new Float64Array(pal.length);
+    const sb = new Float64Array(pal.length);
+    const n = new Float64Array(pal.length);
+    for (let i = 0; i < ids.length; i++) {
+      const k = ids[i];
+      if (k < 0) continue;
+      const o = i * channels;
+      const dr = rgba[o] - (pal[k] >> 16);
+      const dg = rgba[o + 1] - ((pal[k] >> 8) & 255);
+      const db = rgba[o + 2] - (pal[k] & 255);
+      if (dr * dr + dg * dg + db * db > maxD2) continue;
+      sr[k] += rgba[o];
+      sg[k] += rgba[o + 1];
+      sb[k] += rgba[o + 2];
+      n[k]++;
+    }
+    let moved = 0;
+    pal = pal.map((c, k) => {
+      if (n[k] < 20) return c;
+      const r = Math.round(sr[k] / n[k]);
+      const g = Math.round(sg[k] / n[k]);
+      const b = Math.round(sb[k] / n[k]);
+      const nc = (r << 16) | (g << 8) | b;
+      if (nc !== c) moved++;
+      return nc;
+    });
+    if (!moved) break;
+  }
+  return pal;
 }

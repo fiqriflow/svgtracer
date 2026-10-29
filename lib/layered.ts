@@ -1,6 +1,6 @@
 import sharp from "sharp";
 import { Potrace } from "potrace";
-import { assignPalette, buildPalette, softAssign } from "./quantize";
+import { assignPalette, buildPalette, refinePalette, softAssign } from "./quantize";
 import { edgeSmooth } from "./denoise";
 import { ellipseTag, snapEllipses } from "./shapes";
 import { simplifyTag } from "./simplify";
@@ -59,7 +59,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const ch = orig.info.channels;
   // Penghalus penjaga tepi: derau JPEG & gradasi lembut hilang, tepi tetap tajam
   const px = o.denoise === false ? orig.data : edgeSmooth(orig.data, ch, W0, H0, { radius: 2, tol: 28, passes: 2 });
-  const palette = buildPalette(px, ch, o.colors);
+  const palette = refinePalette(px, ch, buildPalette(px, ch, o.colors));
   if (!palette.length) throw new Error("Gambar kosong.");
   let ids = assignPalette(px, ch, palette);
 
@@ -107,10 +107,38 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     }
   }
 
+  // Setelah penggabungan: hitung ulang warna ke rata-rata piksel sebenarnya
+  const refined = refinePalette(px, ch, palette);
+  palette.length = 0;
+  palette.push(...refined);
+  ids = assignPalette(px, ch, palette);
+
   // Urutkan dari area terbesar (lapisan paling bawah); indeks palet = peringkat
   const counts = new Array<number>(palette.length).fill(0);
   for (let i = 0; i < N0; i++) if (ids[i] >= 0) counts[ids[i]]++;
-  const order = palette.map((_, i) => i).sort((a, b) => counts[b] - counts[a]);
+  const edgeF = new Array<number>(palette.length).fill(0);
+  for (let y = 1; y < H0 - 1; y++) {
+    for (let x = 1; x < W0 - 1; x++) {
+      const i = y * W0 + x;
+      const id = ids[i];
+      if (id >= 0 && (ids[i - 1] !== id || ids[i + 1] !== id || ids[i - W0] !== id || ids[i + W0] !== id)) edgeF[id]++;
+    }
+  }
+  for (let k = 0; k < palette.length; k++) edgeF[k] = counts[k] ? edgeF[k] / counts[k] : 0;
+  // Warna kecil berkontras rendah (blush/bayangan lembut) digambar lebih dulu supaya tidak menimpa
+  // detail tegas (mata, kacamata) yang berdekatan; sisanya urut dari area terbesar.
+  const minDist = palette.map((c, i) => {
+    let m = Infinity;
+    palette.forEach((d, j) => {
+      if (i === j) return;
+      m = Math.min(m, Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255)));
+    });
+    return m;
+  });
+  const isSoft = (i: number) => counts[i] < N0 * 0.02 && minDist[i] < 45;
+  const order = palette
+    .map((_, i) => i)
+    .sort((a, b) => (isSoft(a) === isSoft(b) ? counts[b] - counts[a] : isSoft(a) ? -1 : 1));
   const ranked = order.map((i) => palette[i]);
   const soft = softAssign(px, ch, ranked, W0, H0);
   const cover = new Uint8Array(N0); // alpha asli 0-255
@@ -155,7 +183,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       alphaMax: o.alphaMax ?? 1,
       optCurve: true,
     });
-    const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0);
+    const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0, false);
     if (!tag.includes(' d=""')) paths += tag;
     for (const e of shapes) paths += ellipseTag(e, color);
   }
@@ -189,5 +217,5 @@ export async function traceBlackWhite(
     alphaMax: 1,
     optCurve: true,
   });
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${simplifyTag(p.getPathTag("#000000"), o.fit ?? 0)}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${simplifyTag(p.getPathTag("#000000"), o.fit ?? 0, true)}</svg>`;
 }

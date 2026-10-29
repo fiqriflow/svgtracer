@@ -41,6 +41,8 @@ export async function POST(req: Request) {
     const colors = Math.round(clamp(s.colors, 2, 64, 24));
     // Toleransi penyederhanaan kurva (px upscale): makin tinggi "haluskan" makin sedikit simpul
     const fit = smooth > 0 ? (0.25 + 0.2 * smooth) * scale : 0;
+    // Mode warna: toleransi lebih longgar (gabung kurva lebih panjang -> tanpa gelombang)
+    const fitColor = smooth > 0 ? (0.8 + 0.2 * smooth) * scale : 0;
 
     let svg: string;
     let engine: "smooth" | "detail" | "bw";
@@ -71,7 +73,7 @@ export async function POST(req: Request) {
           // kurva Potrace: makin tinggi "haluskan" makin sedikit simpul & sudut makin lembut
           opt: 0.5 + 0.1 * smooth,
           alphaMax: 1 + 0.04 * smooth,
-          fit,
+          fit: fitColor,
           // bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (default aktif)
           snap: s.snap !== false,
           denoise: true,
