@@ -4,6 +4,7 @@ import { assignPalette, buildPalette, refinePalette, softAssign } from "./quanti
 import { edgeSmooth } from "./denoise";
 import { ellipseTag, snapEllipses } from "./shapes";
 import { simplifyTag } from "./simplify";
+import { traceField } from "./curvefit";
 
 export type LayeredOptions = {
   /** Jumlah warna palet (mode warna) */
@@ -26,6 +27,20 @@ export type LayeredOptions = {
   mergeDist?: number;
   /** Lebar kerah (px gambar asli): lapisan hanya menyelip ke bawah warna atas sejauh ini, sehingga tepi tidak berpinggiran warna lapisan lain. 0 = mati */
   collar?: number;
+  /** Buang pulau kelas warna lebih kecil dari ini (px gambar asli) sebelum tracing: bercak di gradasi lembut/JPEG. 0 = mati */
+  cleanArea?: number;
+  /** Pelacak kurva: "own" (Bezier sendiri, default) atau "potrace" */
+  tracer?: "own" | "potrace";
+  /** Galat kurva maksimum (px medan) untuk tracer sendiri */
+  fitErr?: number;
+  /** Radius opening morfologi antar warna mirip (px asli, 0 = mati); butuh closeSmooth > 0 */
+  openClose?: number;
+  /** Lintasan filter mayoritas antar warna mirip (0 = mati) */
+  closeSmooth?: number;
+  /** Lintasan penghalusan kontur pada tracer sendiri */
+  curveSmooth?: number;
+  /** Sudut belok minimal (derajat) untuk sudut tajam pada tracer sendiri */
+  corner?: number;
   /** Toleransi warna penghalus penjaga tepi (default 28). Lebih kecil = bentuk kecil berkontras rendah (pipi, bayangan) lebih terjaga */
   denoiseTol?: number;
   /** Toleransi penyederhanaan kurva (px resolusi upscale): gabung segmen mulus, buang gelombang/simpul berlebih. 0 = mati */
@@ -109,6 +124,231 @@ function addEnclosedIslands(rk: Int16Array, W: number, H: number, r: number, nea
   }
 }
 
+/**
+ * Buang pulau kecil pada peta kelas warna: tiap komponen (4-tetangga) berluas < minArea diberi
+ * kelas tetangga terdekat dalam warna, dan pikselnya diganti warna palet kelas itu.
+ * Ini menghilangkan bercak yang timbul saat nilai piksel gradasi lembut/JPEG berayun di
+ * sekitar batas dua warna palet yang mirip.
+ */
+function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, minArea: number, minAreaClose = 0): void {
+  if (minArea <= 1) return;
+  const closeTo = (a: number, b: number) => {
+    const c = palette[a];
+    const d = palette[b];
+    return Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255)) < 32;
+  };
+  const N = W * H;
+  const lab = new Int32Array(N).fill(-1);
+  const queue = new Int32Array(N);
+  const small: number[] = [];
+  let nComp = 0;
+  const isSmall: boolean[] = [];
+  for (let s = 0; s < N; s++) {
+    if (lab[s] >= 0 || ids[s] < 0) continue;
+    const id = ids[s];
+    let n = 0;
+    let head = 0;
+    queue[n++] = s;
+    lab[s] = nComp;
+    while (head < n) {
+      const i = queue[head++];
+      const x = i % W;
+      if (x > 0 && lab[i - 1] < 0 && ids[i - 1] === id) ((lab[i - 1] = nComp), (queue[n++] = i - 1));
+      if (x < W - 1 && lab[i + 1] < 0 && ids[i + 1] === id) ((lab[i + 1] = nComp), (queue[n++] = i + 1));
+      if (i >= W && lab[i - W] < 0 && ids[i - W] === id) ((lab[i - W] = nComp), (queue[n++] = i - W));
+      if (i + W < N && lab[i + W] < 0 && ids[i + W] === id) ((lab[i + W] = nComp), (queue[n++] = i + W));
+    }
+    let sm = n < minArea;
+    if (!sm && n < minAreaClose) {
+      // Pulau lebih besar tetap dibuang bila hampir seluruh tepinya berbatasan dengan warna yang mirip
+      let tot = 0;
+      let cl = 0;
+      for (let k = 0; k < n; k++) {
+        const i = queue[k];
+        const x = i % W;
+        const nb = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i >= W ? i - W : -1, i + W < N ? i + W : -1];
+        for (const j of nb) {
+          if (j < 0 || ids[j] < 0 || ids[j] === id) continue;
+          tot++;
+          if (closeTo(id, ids[j])) cl++;
+        }
+      }
+      sm = tot > 0 && cl / tot >= 0.6;
+    }
+    isSmall.push(sm);
+    if (sm) for (let k = 0; k < n; k++) small.push(queue[k]);
+    nComp++;
+  }
+  if (!small.length) return;
+  const newId = new Int16Array(small.length);
+  for (let k = 0; k < small.length; k++) {
+    const i = small[k];
+    const x = i % W;
+    const y = (i - x) / W;
+    const o = i * ch;
+    let best = -1;
+    let bd = Infinity;
+    for (let R = 2; R <= 8 && best < 0; R += 3) {
+      for (let dy = -R; dy <= R; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= H) continue;
+        for (let dx = -R; dx <= R; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= W) continue;
+          const j = yy * W + xx;
+          if (ids[j] < 0 || isSmall[lab[j]]) continue;
+          const c = palette[ids[j]];
+          const dr = px[o] - (c >> 16);
+          const dg = px[o + 1] - ((c >> 8) & 255);
+          const db = px[o + 2] - (c & 255);
+          const d = dr * dr + dg * dg + db * db;
+          if (d < bd) {
+            bd = d;
+            best = ids[j];
+          }
+        }
+      }
+    }
+    newId[k] = best;
+  }
+  for (let k = 0; k < small.length; k++) {
+    if (newId[k] < 0) continue;
+    const i = small[k];
+    ids[i] = newId[k];
+    const c = palette[newId[k]];
+    px[i * ch] = c >> 16;
+    px[i * ch + 1] = (c >> 8) & 255;
+    px[i * ch + 2] = c & 255;
+  }
+}
+
+/**
+ * Filter mayoritas untuk kelas warna yang MIRIP (jarak < closeDist): batas antar dua warna
+ * yang nyaris sama (gradasi lembut/JPEG) ditentukan oleh suara tetangga sehingga menjadi satu
+ * tepi bersih, bukan bercak. Batas warna yang kontras tidak disentuh.
+ */
+function smoothCloseClasses(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, radius: number, closeDist: number, passes: number): void {
+  const K = palette.length;
+  const close: boolean[][] = palette.map((c, i) =>
+    palette.map((d, j) => i === j || Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255)) < closeDist),
+  );
+  const votes = new Int32Array(K);
+  for (let pass = 0; pass < passes; pass++) {
+    const next = ids.slice();
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        const c = ids[i];
+        if (c < 0) continue;
+        // hanya di dekat batas: salah satu tetangga 4-arah berbeda kelas tetapi masih "mirip"
+        const l = x > 0 ? ids[i - 1] : c;
+        const r = x < W - 1 ? ids[i + 1] : c;
+        const u = y > 0 ? ids[i - W] : c;
+        const d = y < H - 1 ? ids[i + W] : c;
+        const diff = (l !== c && l >= 0 && close[c][l]) || (r !== c && r >= 0 && close[c][r]) || (u !== c && u >= 0 && close[c][u]) || (d !== c && d >= 0 && close[c][d]);
+        if (!diff) continue;
+        votes.fill(0);
+        for (let dy = -radius; dy <= radius; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= H) continue;
+          for (let dx = -radius; dx <= radius; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= W) continue;
+            const k = ids[yy * W + xx];
+            if (k >= 0 && close[c][k]) votes[k]++;
+          }
+        }
+        let best = c;
+        for (let k = 0; k < K; k++) if (votes[k] > votes[best]) best = k;
+        if (best !== c) next[i] = best;
+      }
+    }
+    for (let i = 0; i < ids.length; i++) {
+      if (next[i] !== ids[i]) {
+        ids[i] = next[i];
+        const c = palette[next[i]];
+        px[i * ch] = c >> 16;
+        px[i * ch + 1] = (c >> 8) & 255;
+        px[i * ch + 2] = c & 255;
+      }
+    }
+  }
+}
+
+/**
+ * Opening morfologi (kikis lalu kembangkan, radius r) pada tiap kelas yang punya kelas MIRIP:
+ * benjolan/leher sempit/tonjolan tipis yang menempel ke area lain terpotong dan diberikan ke
+ * kelas mirip terdekat. Fitur tipis berkontras tinggi (garis, kacamata) tidak tersentuh
+ * karena hanya dipindah bila pengganti terdekat berwarna mirip.
+ */
+function openCloseClasses(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, r: number): void {
+  if (r <= 0) return;
+  const N = W * H;
+  const K = palette.length;
+  const dist = (a: number, b: number) => {
+    const c = palette[a];
+    const d = palette[b];
+    return Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255));
+  };
+  const removed: number[] = [];
+  for (let c = 0; c < K; c++) {
+    let hasClose = false;
+    for (let k = 0; k < K; k++) if (k !== c && dist(c, k) < 32) hasClose = true;
+    if (!hasClose) continue;
+    const m = new Uint8Array(N);
+    const inv = new Uint8Array(N);
+    for (let i = 0; i < N; i++) {
+      if (ids[i] === c) m[i] = 1;
+      else inv[i] = 1;
+    }
+    const grown = dilate(inv, W, H, r); // piksel dalam jarak r dari bukan-c
+    const eroded = new Uint8Array(N);
+    for (let i = 0; i < N; i++) eroded[i] = m[i] && !grown[i] ? 1 : 0;
+    const opened = dilate(eroded, W, H, r);
+    for (let i = 0; i < N; i++) if (m[i] && !opened[i]) removed.push(i * K + c);
+  }
+  const newId = new Int16Array(removed.length).fill(-1);
+  for (let q = 0; q < removed.length; q++) {
+    const c = removed[q] % K;
+    const i = (removed[q] - c) / K;
+    const x = i % W;
+    const y = (i - x) / W;
+    const o = i * ch;
+    let best = -1;
+    let bd = Infinity;
+    for (let dy = -(r + 2); dy <= r + 2; dy++) {
+      const yy = y + dy;
+      if (yy < 0 || yy >= H) continue;
+      for (let dx = -(r + 2); dx <= r + 2; dx++) {
+        const xx = x + dx;
+        if (xx < 0 || xx >= W) continue;
+        const k = ids[yy * W + xx];
+        if (k < 0 || k === c || dist(c, k) >= 32) continue;
+        const col = palette[k];
+        const er = px[o] - (col >> 16);
+        const eg = px[o + 1] - ((col >> 8) & 255);
+        const eb = px[o + 2] - (col & 255);
+        const e = er * er + eg * eg + eb * eb;
+        if (e < bd) {
+          bd = e;
+          best = k;
+        }
+      }
+    }
+    newId[q] = best;
+  }
+  for (let q = 0; q < removed.length; q++) {
+    if (newId[q] < 0) continue;
+    const c = removed[q] % K;
+    const i = (removed[q] - c) / K;
+    ids[i] = newId[q];
+    const col = palette[newId[q]];
+    px[i * ch] = col >> 16;
+    px[i * ch + 1] = (col >> 8) & 255;
+    px[i * ch + 2] = col & 255;
+  }
+}
+
 const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
 
 /**
@@ -188,6 +428,15 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   palette.push(...refined.map(snapNeutral));
   ids = assignPalette(px, ch, palette);
 
+  // Luas pembersihan diskalakan dengan ukuran gambar (dasar = 250 ribu piksel)
+  const cleanArea = Math.round((o.cleanArea ?? 0) * Math.max(1, Math.sqrt(N0 / 250000)));
+  cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea);
+  if ((o.closeSmooth ?? 0) > 0) {
+    smoothCloseClasses(px, ch, ids, palette, W0, H0, Math.max(2, Math.round(Math.max(W0, H0) / 600)), 32, o.closeSmooth ?? 0);
+    cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, cleanArea * 12);
+    openCloseClasses(px, ch, ids, palette, W0, H0, Math.round(o.openClose ?? 0));
+  }
+
   // Urutkan dari area terbesar (lapisan paling bawah); indeks palet = peringkat
   const counts = new Array<number>(palette.length).fill(0);
   for (let i = 0; i < N0; i++) if (ids[i] >= 0) counts[ids[i]]++;
@@ -263,20 +512,31 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     const color = hex(ranked[r]);
     // Bentuk bulat/lonjong -> elips sempurna; sisanya lewat Potrace
     const shapes = o.snap ? snapEllipses(blurred, w, h, { minArea: 20 * o.scale * o.scale }) : [];
-    const png = await sharp(blurred, { raw: { width: w, height: h, channels: 1 } })
-      .toColourspace("b-w")
-      .png()
-      .toBuffer();
-    const p = await loadTrace(png, {
-      threshold: 128,
-      blackOnWhite: true,
-      turdSize: o.turd,
-      optTolerance: o.opt,
-      alphaMax: o.alphaMax ?? 1,
-      optCurve: true,
-    });
-    const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0, false);
-    if (!tag.includes(' d=""')) paths += tag;
+    if ((o.tracer ?? "own") === "own") {
+      const d = traceField(blurred, w, h, {
+        turd: o.turd,
+        err: o.fitErr ?? 0.8,
+        corner: o.corner ?? 50,
+        win: 3 + 1.2 * o.scale,
+        smooth: o.curveSmooth ?? 6,
+      });
+      if (d) paths += `<path d="${d}" fill="${color}" fill-rule="evenodd" stroke="none"/>`;
+    } else {
+      const png = await sharp(blurred, { raw: { width: w, height: h, channels: 1 } })
+        .toColourspace("b-w")
+        .png()
+        .toBuffer();
+      const p = await loadTrace(png, {
+        threshold: 128,
+        blackOnWhite: true,
+        turdSize: o.turd,
+        optTolerance: o.opt,
+        alphaMax: o.alphaMax ?? 1,
+        optCurve: true,
+      });
+      const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0, false);
+      if (!tag.includes(' d=""')) paths += tag;
+    }
     for (const e of shapes) paths += ellipseTag(e, color);
   }
 

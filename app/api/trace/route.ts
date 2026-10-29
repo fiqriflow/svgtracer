@@ -80,6 +80,13 @@ export async function POST(req: Request) {
           mergeDist: 10,
           denoiseTol: 22,
           collar: 3,
+          cleanArea: speckles * 8,
+          closeSmooth: 2,
+          tracer: "own",
+          // toleransi & penghalusan kurva ikut skala (sumber beresolusi rendah punya anak tangga piksel lebih lebar)
+          fitErr: 0.5 + 0.75 * scale,
+          corner: 50,
+          curveSmooth: Math.round(8 * scale - 2),
         });
       } else {
         engine = "detail";
