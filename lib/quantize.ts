@@ -134,3 +134,99 @@ export function assignPalette(rgba: Uint8Array, channels: number, palette: numbe
   }
   return out;
 }
+
+export type SoftMap = {
+  /** Indeks palet terdekat */
+  a: Int16Array;
+  /** Indeks palet kedua (warna di seberang tepi) */
+  b: Int16Array;
+  /** Bobot warna b, 0-255 (0 = murni a) */
+  w: Uint8Array;
+};
+
+/**
+ * Penugasan lembut: tiap piksel = campuran 2 warna palet (a, b) dengan bobot.
+ * Piksel anti-alias di tepi membawa posisi tepi sub-piksel, jadi kontur tidak bergerigi.
+ * Warna kedua dipilih dari 4 tetangga terdekat yang paling pas berada di garis a-b.
+ */
+export function softAssign(rgba: Uint8Array, channels: number, palette: number[]): SoftMap {
+  const n = rgba.length / channels;
+  const K = palette.length;
+  const pr = palette.map((c) => c >> 16);
+  const pg = palette.map((c) => (c >> 8) & 255);
+  const pb = palette.map((c) => c & 255);
+  const a = new Int16Array(n);
+  const b = new Int16Array(n);
+  const w = new Uint8Array(n);
+
+  const SZ = 1 << 21; // kunci 7-bit per kanal
+  const cA = new Int16Array(SZ).fill(-1);
+  const cB = new Int16Array(SZ);
+  const cW = new Uint8Array(SZ);
+
+  const M = Math.min(5, K);
+  const top = new Int32Array(M);
+  const td = new Float64Array(M);
+
+  for (let i = 0; i < n; i++) {
+    const o = i * channels;
+    const r0 = rgba[o];
+    const g0 = rgba[o + 1];
+    const b0 = rgba[o + 2];
+    const key = ((r0 >> 1) << 14) | ((g0 >> 1) << 7) | (b0 >> 1);
+    if (cA[key] < 0) {
+      const r = (r0 & 254) | 1;
+      const g = (g0 & 254) | 1;
+      const bl = (b0 & 254) | 1;
+      // M palet terdekat (urut naik)
+      let cnt = 0;
+      for (let p = 0; p < K; p++) {
+        const dr = r - pr[p];
+        const dg = g - pg[p];
+        const db = bl - pb[p];
+        const d = dr * dr + dg * dg + db * db;
+        if (cnt < M || d < td[cnt - 1]) {
+          let j = cnt < M ? cnt++ : M - 1;
+          while (j > 0 && td[j - 1] > d) {
+            td[j] = td[j - 1];
+            top[j] = top[j - 1];
+            j--;
+          }
+          td[j] = d;
+          top[j] = p;
+        }
+      }
+      const A = top[0];
+      let bestB = A;
+      let bestW = 0;
+      let bestPerp = Infinity;
+      for (let j = 1; j < cnt; j++) {
+        const B = top[j];
+        const vx = pr[B] - pr[A];
+        const vy = pg[B] - pg[A];
+        const vz = pb[B] - pb[A];
+        const vv = vx * vx + vy * vy + vz * vz;
+        if (vv === 0) continue;
+        const t = ((r - pr[A]) * vx + (g - pg[A]) * vy + (bl - pb[A]) * vz) / vv;
+        if (t < -0.05 || t > 1.05) continue;
+        const tc = t < 0 ? 0 : t > 1 ? 1 : t;
+        const ex = r - (pr[A] + tc * vx);
+        const ey = g - (pg[A] + tc * vy);
+        const ez = bl - (pb[A] + tc * vz);
+        const perp = ex * ex + ey * ey + ez * ez;
+        if (perp < bestPerp) {
+          bestPerp = perp;
+          bestB = B;
+          bestW = Math.round(tc * 255);
+        }
+      }
+      cA[key] = A;
+      cB[key] = bestB;
+      cW[key] = bestW;
+    }
+    a[i] = cA[key];
+    b[i] = cB[key];
+    w[i] = cW[key];
+  }
+  return { a, b, w };
+}

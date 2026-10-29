@@ -1,13 +1,13 @@
 import sharp from "sharp";
 import { Potrace } from "potrace";
-import { assignPalette, buildPalette } from "./quantize";
+import { assignPalette, buildPalette, softAssign } from "./quantize";
 
 export type LayeredOptions = {
   /** Jumlah warna palet (mode warna) */
   colors: number;
   /** Skala upscale sebelum tracing */
   scale: number;
-  /** Sigma blur masker (px pada resolusi upscale): makin besar makin halus */
+  /** Sigma blur medan tepi, dalam px GAMBAR ASLI: makin besar makin halus */
   blur: number;
   /** Buang bentuk kecil (luas px pada resolusi upscale) */
   turd: number;
@@ -24,9 +24,12 @@ const loadTrace = (buf: Buffer, params: Record<string, unknown>) =>
 const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
 
 /**
- * Trace berlapis: kuantisasi warna -> satu masker per warna (ditumpuk dari
- * area terbesar) -> blur -> Potrace. Hasil kontur jauh lebih mulus daripada
- * clustering piksel langsung, terutama pada tepi luar.
+ * Trace berlapis dengan tepi sub-piksel:
+ * 1. palet + peringkat warna dihitung di resolusi ASLI
+ * 2. tiap piksel = campuran 2 warna palet (softAssign), sehingga anti-alias
+ *    di tepi tetap membawa posisi tepi yang akurat
+ * 3. tiap lapisan = medan cakupan 0-255 -> upscale kubik -> blur halus -> Potrace
+ * Hasilnya: tepi mulus tanpa gerigi / goyang, sudut dan detail kecil tetap tajam.
  */
 export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<string> {
   const meta = await sharp(input).metadata();
@@ -35,63 +38,65 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   if (!W0 || !H0) throw new Error("Gambar tidak valid.");
   const w = Math.round(W0 * o.scale);
   const h = Math.round(H0 * o.scale);
-  const N = w * h;
+  const N0 = W0 * H0;
 
-  // Palet dihitung dari gambar asli, lalu tiap piksel hasil upscale dipetakan ke palet
   // Denoise ringan: menghilangkan derau halus yang memecah area datar jadi bintik
   const clean = await sharp(input).ensureAlpha().median(3).png().toBuffer();
   const orig = await sharp(clean).raw().toBuffer({ resolveWithObject: true });
-  const palette = buildPalette(orig.data, orig.info.channels, o.colors);
+  const ch = orig.info.channels;
+  const palette = buildPalette(orig.data, ch, o.colors);
   if (!palette.length) throw new Error("Gambar kosong.");
-  const up = await sharp(clean)
-    .resize(w, h, { kernel: "lanczos3" })
-    .raw()
-    .toBuffer({ resolveWithObject: true });
-  let ids = assignPalette(up.data, up.info.channels, palette);
+  let ids = assignPalette(orig.data, ch, palette);
 
   // Buang warna transisi anti-alias: hampir semua pikselnya berada di batas dua area
   for (let pass = 0; pass < 2 && palette.length > 2; pass++) {
     const total = new Array<number>(palette.length).fill(0);
     const edge = new Array<number>(palette.length).fill(0);
-    for (let y = 1; y < h - 1; y++) {
-      for (let x = 1; x < w - 1; x++) {
-        const i = y * w + x;
+    for (let y = 1; y < H0 - 1; y++) {
+      for (let x = 1; x < W0 - 1; x++) {
+        const i = y * W0 + x;
         const id = ids[i];
         if (id < 0) continue;
         total[id]++;
-        if (ids[i - 1] !== id || ids[i + 1] !== id || ids[i - w] !== id || ids[i + w] !== id) edge[id]++;
+        if (ids[i - 1] !== id || ids[i + 1] !== id || ids[i - W0] !== id || ids[i + W0] !== id) edge[id]++;
       }
     }
     const keep = palette.filter((_, k) => total[k] === 0 || edge[k] / total[k] < 0.5);
     if (keep.length === palette.length || keep.length < 2) break;
     palette.length = 0;
     palette.push(...keep);
-    ids = assignPalette(up.data, up.info.channels, palette);
+    ids = assignPalette(orig.data, ch, palette);
   }
 
-  // Urutkan dari area terbesar (lapisan paling bawah)
+  // Urutkan dari area terbesar (lapisan paling bawah); indeks palet = peringkat
   const counts = new Array<number>(palette.length).fill(0);
-  for (let i = 0; i < N; i++) if (ids[i] >= 0) counts[ids[i]]++;
+  for (let i = 0; i < N0; i++) if (ids[i] >= 0) counts[ids[i]]++;
   const order = palette.map((_, i) => i).sort((a, b) => counts[b] - counts[a]);
-  const rankOf = new Int16Array(palette.length);
-  order.forEach((id, r) => (rankOf[id] = r));
-  const rank = new Int16Array(N);
-  for (let i = 0; i < N; i++) rank[i] = ids[i] < 0 ? -1 : rankOf[ids[i]];
+  const ranked = order.map((i) => palette[i]);
+  const soft = softAssign(orig.data, ch, ranked);
+  const cover = new Uint8Array(N0); // alpha asli 0-255
+  for (let i = 0; i < N0; i++) cover[i] = ch === 4 ? orig.data[i * ch + 3] : 255;
 
+  const sigma = Math.max(0.3, o.blur * o.scale);
+  const field = Buffer.allocUnsafe(N0);
   let paths = "";
-  for (let r = 0; r < order.length; r++) {
-    // Lapisan r = semua piksel dengan peringkat >= r (tanpa celah antar warna)
-    const mask = Buffer.alloc(N, 255);
+  for (let r = 0; r < ranked.length; r++) {
+    // Lapisan r = cakupan semua warna dengan peringkat >= r (tanpa celah antar warna)
+    // Potrace: gelap (0) = isi, jadi medan dibalik
     let count = 0;
-    for (let i = 0; i < N; i++) {
-      if (rank[i] >= r) {
-        mask[i] = 0;
-        count++;
-      }
+    for (let i = 0; i < N0; i++) {
+      const wb = soft.w[i];
+      const f = (((soft.a[i] >= r ? 255 - wb : 0) + (soft.b[i] >= r ? wb : 0)) * cover[i]) / 255;
+      if (f >= 128) count++;
+      field[i] = 255 - Math.round(f);
     }
-    if (count <= o.turd) continue;
-    const png = await sharp(mask, { raw: { width: w, height: h, channels: 1 } })
-      .blur(Math.max(0.3, o.blur))
+    if (count * o.scale * o.scale <= o.turd) continue;
+    const big = await sharp(field, { raw: { width: W0, height: H0, channels: 1 } })
+      .resize(w, h, { kernel: "cubic" })
+      .raw()
+      .toBuffer();
+    const png = await sharp(big, { raw: { width: w, height: h, channels: 1 } })
+      .blur(sigma)
       .png()
       .toBuffer();
     const p = await loadTrace(png, {
@@ -102,7 +107,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       alphaMax: 1,
       optCurve: true,
     });
-    paths += p.getPathTag(hex(palette[order[r]]));
+    paths += p.getPathTag(hex(ranked[r]));
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${paths}</svg>`;

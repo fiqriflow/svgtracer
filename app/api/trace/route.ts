@@ -62,8 +62,8 @@ export async function POST(req: Request) {
         svg = await traceLayered(input, {
           scale,
           colors,
-          // sigma blur dalam px resolusi upscale: slider "haluskan" 0-5 -> 0,4-2,4 px gambar asli
-          blur: scale * (0.4 + 0.4 * smooth),
+          // sigma blur dalam px gambar asli: slider "haluskan" 0-5 -> 0,3-1,4 px
+          blur: 0.3 + 0.22 * smooth,
           turd: speckles * Math.round(scale * 2),
           opt: 0.4,
         });
