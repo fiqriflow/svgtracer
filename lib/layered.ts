@@ -125,8 +125,10 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     }
   }
   for (let k = 0; k < palette.length; k++) edgeF[k] = counts[k] ? edgeF[k] / counts[k] : 0;
-  // Warna kecil berkontras rendah (blush/bayangan lembut) digambar lebih dulu supaya tidak menimpa
-  // detail tegas (mata, kacamata) yang berdekatan; sisanya urut dari area terbesar.
+  // Urutan tumpukan (bawah -> atas): 1) warna besar (latar, kulit, baju) urut area; 2) warna kecil
+  // berkontras rendah (blush/bayangan lembut); 3) detail kecil yang tegas (mata, kacamata, logo).
+  // Warna besar WAJIB di dasar: kalau tidak, layer di atasnya berlubang di batas dan latar mengintip
+  // sebagai garis tipis. Blush tetap di bawah mata/kacamata sehingga tidak menimpanya.
   const minDist = palette.map((c, i) => {
     let m = Infinity;
     palette.forEach((d, j) => {
@@ -135,10 +137,10 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     });
     return m;
   });
-  const isSoft = (i: number) => counts[i] < N0 * 0.02 && minDist[i] < 45;
+  const group = (i: number) => (counts[i] >= N0 * 0.02 ? 0 : minDist[i] < 45 ? 1 : 2);
   const order = palette
     .map((_, i) => i)
-    .sort((a, b) => (isSoft(a) === isSoft(b) ? counts[b] - counts[a] : isSoft(a) ? -1 : 1));
+    .sort((a, b) => group(a) - group(b) || counts[b] - counts[a]);
   const ranked = order.map((i) => palette[i]);
   const soft = softAssign(px, ch, ranked, W0, H0);
   const cover = new Uint8Array(N0); // alpha asli 0-255
