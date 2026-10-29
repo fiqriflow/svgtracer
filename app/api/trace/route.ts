@@ -79,6 +79,7 @@ export async function POST(req: Request) {
           denoise: true,
           mergeDist: 10,
           denoiseTol: 22,
+          collar: 3,
         });
       } else {
         engine = "detail";

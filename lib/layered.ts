@@ -24,6 +24,8 @@ export type LayeredOptions = {
   denoise?: boolean;
   /** Warna palet yang jaraknya (RGB) kurang dari ini digabung jadi satu (default 12) */
   mergeDist?: number;
+  /** Lebar kerah (px gambar asli): lapisan hanya menyelip ke bawah warna atas sejauh ini, sehingga tepi tidak berpinggiran warna lapisan lain. 0 = mati */
+  collar?: number;
   /** Toleransi warna penghalus penjaga tepi (default 28). Lebih kecil = bentuk kecil berkontras rendah (pipi, bayangan) lebih terjaga */
   denoiseTol?: number;
   /** Toleransi penyederhanaan kurva (px resolusi upscale): gabung segmen mulus, buang gelombang/simpul berlebih. 0 = mati */
@@ -45,6 +47,23 @@ const snapNeutral = (c: number) => {
   const m = (r + g + b) / 3;
   return m >= 243 ? 0xffffff : m <= 12 ? 0x000000 : c;
 };
+
+/** Dilasi persegi radius r pada masker biner (O(N), dua lintasan dengan jumlah prefiks) */
+function dilate(mask: Uint8Array, W: number, H: number, r: number): Uint8Array {
+  const tmp = new Uint8Array(W * H);
+  const out = new Uint8Array(W * H);
+  const pre = new Int32Array(Math.max(W, H) + 1);
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    for (let x = 0; x < W; x++) pre[x + 1] = pre[x] + mask[row + x];
+    for (let x = 0; x < W; x++) tmp[row + x] = pre[Math.min(W, x + r + 1)] - pre[Math.max(0, x - r)] > 0 ? 1 : 0;
+  }
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) pre[y + 1] = pre[y] + tmp[y * W + x];
+    for (let y = 0; y < H; y++) out[y * W + x] = pre[Math.min(H, y + r + 1)] - pre[Math.max(0, y - r)] > 0 ? 1 : 0;
+  }
+  return out;
+}
 
 const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
 
@@ -158,16 +177,30 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const cover = new Uint8Array(N0); // alpha asli 0-255
   for (let i = 0; i < N0; i++) cover[i] = ch === 4 ? orig.data[i * ch + 3] : 255;
 
+  // Peringkat murni tiap piksel (untuk kerah lapisan)
+  const collar = Math.round(o.collar ?? 0);
+  const rk = new Int16Array(N0);
+  for (let i = 0; i < N0; i++) rk[i] = cover[i] < 128 ? -1 : soft.w[i] < 128 ? soft.a[i] : soft.b[i];
+
   const sigma = Math.max(0.3, o.blur * o.scale);
   const field = Buffer.allocUnsafe(N0);
   let paths = "";
   for (let r = 0; r < ranked.length; r++) {
     // Lapisan r = cakupan semua warna dengan peringkat >= r (tanpa celah antar warna)
     // Potrace: gelap (0) = isi, jadi medan dibalik
+    // Lapisan r (kecuali dasar) hanya mencakup piksel peringkat lebih tinggi yang berada dalam
+    // kerah di sekitar warna r sendiri; di tempat lain lapisan bawah yang tampak adalah tetangga asli
+    let near: Uint8Array | null = null;
+    if (collar > 0 && r > 0) {
+      const own = new Uint8Array(N0);
+      for (let i = 0; i < N0; i++) if (rk[i] === r) own[i] = 1;
+      near = dilate(own, W0, H0, collar);
+    }
     let count = 0;
     for (let i = 0; i < N0; i++) {
       const wb = soft.w[i];
-      const f = (((soft.a[i] >= r ? 255 - wb : 0) + (soft.b[i] >= r ? wb : 0)) * cover[i]) / 255;
+      let f = (((soft.a[i] >= r ? 255 - wb : 0) + (soft.b[i] >= r ? wb : 0)) * cover[i]) / 255;
+      if (near && !near[i]) f = 0;
       if (f >= 128) count++;
       field[i] = 255 - Math.round(f);
     }
