@@ -93,10 +93,12 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     if (count * o.scale * o.scale <= o.turd) continue;
     const big = await sharp(field, { raw: { width: W0, height: H0, channels: 1 } })
       .resize(w, h, { kernel: "cubic" })
+      .toColourspace("b-w") // paksa 1 kanal (default sharp: 3 kanal)
       .raw()
       .toBuffer();
     const png = await sharp(big, { raw: { width: w, height: h, channels: 1 } })
       .blur(sigma)
+      .toColourspace("b-w")
       .png()
       .toBuffer();
     const p = await loadTrace(png, {
