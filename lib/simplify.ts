@@ -109,12 +109,12 @@ function solve(pts: Pt[], u: number[], P0: Pt, P3: Pt, t1: Pt, t2: Pt, pathLen: 
 }
 
 /** Gabungkan segs[i..k] jadi satu kurva bila simpangan maksimum <= tol, selain itu null */
-function fitRun(segs: Seg[], i: number, k: number, tol: number, tOut: Pt, tIn: Pt): Seg | null {
+function fitRun(orig: Seg[], segs: Seg[], i: number, k: number, tol: number, tOut: Pt, tIn: Pt): Seg | null {
   const pts: Pt[] = [];
   for (let s = i; s <= k; s++) {
-    for (let j = 0; j < SAMPLES; j++) pts.push(bez(segs[s], j / SAMPLES));
+    for (let j = 0; j < SAMPLES; j++) pts.push(bez(orig[s], j / SAMPLES));
   }
-  pts.push(segs[k].p3);
+  pts.push(orig[k].p3);
 
   const u: number[] = [0];
   for (let j = 1; j < pts.length; j++) u.push(u[j - 1] + len(sub(pts[j], pts[j - 1])));
@@ -178,6 +178,9 @@ function simplifySub(segs: Seg[], tol: number): Seg[] {
   }
   const list = rot > 0 ? [...segs.slice(rot), ...segs.slice(0, rot)] : segs;
 
+  // Salinan path asli: simpangan selalu diukur terhadap bentuk ASLI, bukan yang sudah digeser
+  const orig: Seg[] = list.map((sg) => ({ ...sg }));
+
   // Haluskan posisi simpul di sambungan mulus (rata-rata 1-2-1 dengan tetangga, 2 putaran):
   // simpul yang selang-seling maju/mundur (gerigi/gelombang) jadi rata. Sudut tidak disentuh.
   const smoothNode = list.map((_, j) => smoothJoint(list[(j + n - 1) % n], list[j]));
@@ -187,7 +190,12 @@ function simplifySub(segs: Seg[], tol: number): Seg[] {
       if (!smoothNode[j]) return { x: 0, y: 0 };
       const a = np[(j + n - 1) % n];
       const b = np[(j + 1) % n];
-      return { x: (a.x + b.x) / 4 + q.x / 2 - q.x, y: (a.y + b.y) / 4 + q.y / 2 - q.y };
+      const dx = (a.x + b.x) / 4 + q.x / 2 - q.x;
+      const dy = (a.y + b.y) / 4 + q.y / 2 - q.y;
+            const m = Math.hypot(dx, dy);
+      // pergeseran besar = lengkung asli (bukan gerigi): jangan disentuh, supaya bentuk tidak menyusut
+      if (m > tol * 0.6) return { x: 0, y: 0 };
+      return { x: dx, y: dy };
     });
     for (let j = 0; j < n; j++) {
       const d = shift[j];
@@ -229,7 +237,7 @@ function simplifySub(segs: Seg[], tol: number): Seg[] {
     if (s.c) {
       let k = i + 1;
       while (k < n && k - i < MAX_RUN && smoothJoint(list[k - 1], list[k])) {
-        const fit = fitRun(list, i, k, tol, tanOut[i], tanIn[k + 1]);
+        const fit = fitRun(orig, list, i, k, tol, tanOut[i], tanIn[k + 1]);
         if (!fit) break;
         best = fit;
         last = k;
