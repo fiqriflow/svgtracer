@@ -3,6 +3,7 @@ import { Potrace } from "potrace";
 import { assignPalette, buildPalette, softAssign } from "./quantize";
 import { edgeSmooth } from "./denoise";
 import { ellipseTag, snapEllipses } from "./shapes";
+import { simplifyTag } from "./simplify";
 
 export type LayeredOptions = {
   /** Jumlah warna palet (mode warna) */
@@ -23,6 +24,8 @@ export type LayeredOptions = {
   denoise?: boolean;
   /** Warna palet yang jaraknya (RGB) kurang dari ini digabung jadi satu (default 12) */
   mergeDist?: number;
+  /** Toleransi penyederhanaan kurva (px resolusi upscale): gabung segmen mulus, buang gelombang/simpul berlebih. 0 = mati */
+  fit?: number;
 };
 
 const loadTrace = (buf: Buffer, params: Record<string, unknown>) =>
@@ -152,7 +155,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       alphaMax: o.alphaMax ?? 1,
       optCurve: true,
     });
-    const tag = p.getPathTag(color);
+    const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0);
     if (!tag.includes(' d=""')) paths += tag;
     for (const e of shapes) paths += ellipseTag(e, color);
   }
@@ -163,7 +166,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
 /** Hitam-putih: satu lapisan Potrace dari gambar grayscale yang dihaluskan */
 export async function traceBlackWhite(
   input: Buffer,
-  o: { scale: number; blur: number; turd: number; opt: number; threshold: number },
+  o: { scale: number; blur: number; turd: number; opt: number; threshold: number; fit?: number },
 ): Promise<string> {
   const meta = await sharp(input).metadata();
   const W0 = meta.width ?? 0;
@@ -186,5 +189,5 @@ export async function traceBlackWhite(
     alphaMax: 1,
     optCurve: true,
   });
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${p.getPathTag("#000000")}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${simplifyTag(p.getPathTag("#000000"), o.fit ?? 0)}</svg>`;
 }

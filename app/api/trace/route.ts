@@ -39,6 +39,8 @@ export async function POST(req: Request) {
     const smooth = clamp(s.smooth, 0, 5, 1.5);
     const speckles = Math.round(clamp(s.speckles, 0, 60, 8));
     const colors = Math.round(clamp(s.colors, 2, 64, 24));
+    // Toleransi penyederhanaan kurva (px upscale): makin tinggi "haluskan" makin sedikit simpul
+    const fit = smooth > 0 ? (0.3 + 0.25 * smooth) * scale : 0;
 
     let svg: string;
     let engine: "smooth" | "detail" | "bw";
@@ -48,7 +50,8 @@ export async function POST(req: Request) {
         scale,
         blur: scale * (0.4 + 0.4 * smooth),
         turd: speckles * Math.round(scale * 2),
-        opt: 0.4,
+        opt: 0.6 + 0.2 * smooth,
+        fit,
         threshold: Math.round(clamp(s.threshold, 20, 235, 128)),
       });
     } else {
@@ -63,11 +66,12 @@ export async function POST(req: Request) {
           scale,
           colors,
           // sigma blur dalam px gambar asli: slider "haluskan" 0-5 -> 0,3-1,4 px
-          blur: 0.3 + 0.22 * smooth,
+          blur: 0.4 + 0.28 * smooth,
           turd: speckles * Math.round(scale * 2),
           // kurva Potrace: makin tinggi "haluskan" makin sedikit simpul & sudut makin lembut
-          opt: 0.5 + 0.1 * smooth,
-          alphaMax: 1 + 0.04 * smooth,
+          opt: 0.6 + 0.2 * smooth,
+          alphaMax: Math.min(1.25, 1 + 0.05 * smooth),
+          fit,
           // bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (default aktif)
           snap: s.snap !== false,
           denoise: true,
