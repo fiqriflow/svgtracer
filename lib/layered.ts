@@ -47,7 +47,27 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     .resize(w, h, { kernel: "lanczos3" })
     .raw()
     .toBuffer({ resolveWithObject: true });
-  const ids = assignPalette(up.data, up.info.channels, palette);
+  let ids = assignPalette(up.data, up.info.channels, palette);
+
+  // Buang warna transisi anti-alias: hampir semua pikselnya berada di batas dua area
+  for (let pass = 0; pass < 2 && palette.length > 2; pass++) {
+    const total = new Array<number>(palette.length).fill(0);
+    const edge = new Array<number>(palette.length).fill(0);
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const id = ids[i];
+        if (id < 0) continue;
+        total[id]++;
+        if (ids[i - 1] !== id || ids[i + 1] !== id || ids[i - w] !== id || ids[i + w] !== id) edge[id]++;
+      }
+    }
+    const keep = palette.filter((_, k) => total[k] === 0 || edge[k] / total[k] < 0.5);
+    if (keep.length === palette.length || keep.length < 2) break;
+    palette.length = 0;
+    palette.push(...keep);
+    ids = assignPalette(up.data, up.info.channels, palette);
+  }
 
   // Urutkan dari area terbesar (lapisan paling bawah)
   const counts = new Array<number>(palette.length).fill(0);
