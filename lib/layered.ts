@@ -24,6 +24,8 @@ export type LayeredOptions = {
   denoise?: boolean;
   /** Warna palet yang jaraknya (RGB) kurang dari ini digabung jadi satu (default 12) */
   mergeDist?: number;
+  /** Toleransi warna penghalus penjaga tepi (default 28). Lebih kecil = bentuk kecil berkontras rendah (pipi, bayangan) lebih terjaga */
+  denoiseTol?: number;
   /** Toleransi penyederhanaan kurva (px resolusi upscale): gabung segmen mulus, buang gelombang/simpul berlebih. 0 = mati */
   fit?: number;
 };
@@ -33,6 +35,16 @@ const loadTrace = (buf: Buffer, params: Record<string, unknown>) =>
     const p = new Potrace(params);
     p.loadImage(buf, (e) => (e ? reject(e) : resolve(p)));
   });
+
+/** Putih/hitam nyaris murni (sisa derau JPEG) -> #ffffff / #000000 persis */
+const snapNeutral = (c: number) => {
+  const r = c >> 16;
+  const g = (c >> 8) & 255;
+  const b = c & 255;
+  if (Math.max(r, g, b) - Math.min(r, g, b) > 10) return c;
+  const m = (r + g + b) / 3;
+  return m >= 243 ? 0xffffff : m <= 12 ? 0x000000 : c;
+};
 
 const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
 
@@ -58,7 +70,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const orig = await sharp(clean).raw().toBuffer({ resolveWithObject: true });
   const ch = orig.info.channels;
   // Penghalus penjaga tepi: derau JPEG & gradasi lembut hilang, tepi tetap tajam
-  const px = o.denoise === false ? orig.data : edgeSmooth(orig.data, ch, W0, H0, { radius: 2, tol: 28, passes: 2 });
+  const px = o.denoise === false ? orig.data : edgeSmooth(orig.data, ch, W0, H0, { radius: 2, tol: o.denoiseTol ?? 28, passes: 2 });
   const palette = refinePalette(px, ch, buildPalette(px, ch, o.colors));
   if (!palette.length) throw new Error("Gambar kosong.");
   let ids = assignPalette(px, ch, palette);
@@ -110,7 +122,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   // Setelah penggabungan: hitung ulang warna ke rata-rata piksel sebenarnya
   const refined = refinePalette(px, ch, palette);
   palette.length = 0;
-  palette.push(...refined);
+  palette.push(...refined.map(snapNeutral));
   ids = assignPalette(px, ch, palette);
 
   // Urutkan dari area terbesar (lapisan paling bawah); indeks palet = peringkat

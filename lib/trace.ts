@@ -17,12 +17,12 @@ export type TraceSettings = {
   snap: boolean;
 };
 
-/** Preset awal: cocok untuk ilustrasi/maskot flat, minim gradasi */
+/** Preset awal: karakter/maskot flat minimalis tanpa gradasi (metode Halus, 24 warna) */
 export const DEFAULT_SETTINGS: TraceSettings = {
   mode: "color",
-  engine: "auto",
+  engine: "smooth",
   colors: 24,
-  speckles: 8,
+  speckles: 4,
   smooth: 1.5,
   threshold: 128,
   snap: true,

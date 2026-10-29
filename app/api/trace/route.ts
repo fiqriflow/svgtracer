@@ -11,7 +11,7 @@ const MAX_BYTES = 4.2 * 1024 * 1024;
 /** Sisi terpanjang target untuk tracing; gambar kecil di-upscale sampai sini (maks 2x) */
 const TARGET_SIDE = 1400;
 /** Gambar dianggap "flat bersih" bila 16 warna dominan mencakup porsi ini */
-const FLAT_THRESHOLD = 0.96;
+const FLAT_THRESHOLD = 0.88;
 
 const clamp = (v: unknown, min: number, max: number, d: number) => {
   const n = Number(v);
@@ -37,7 +37,7 @@ export async function POST(req: Request) {
 
     const scale = Math.min(2, Math.max(1, TARGET_SIDE / long));
     const smooth = clamp(s.smooth, 0, 5, 1.5);
-    const speckles = Math.round(clamp(s.speckles, 0, 60, 8));
+    const speckles = Math.round(clamp(s.speckles, 0, 60, 4));
     const colors = Math.round(clamp(s.colors, 2, 64, 24));
     // Toleransi penyederhanaan kurva (px upscale): makin tinggi "haluskan" makin sedikit simpul
     const fit = smooth > 0 ? (0.25 + 0.2 * smooth) * scale : 0;
@@ -77,7 +77,8 @@ export async function POST(req: Request) {
           // bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (default aktif)
           snap: s.snap !== false,
           denoise: true,
-          mergeDist: 12,
+          mergeDist: 10,
+          denoiseTol: 22,
         });
       } else {
         engine = "detail";
