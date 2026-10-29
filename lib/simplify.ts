@@ -165,7 +165,114 @@ function fitRun(orig: Seg[], segs: Seg[], i: number, k: number, tol: number, tOu
   return best;
 }
 
-function simplifySub(segs: Seg[], tol: number): Seg[] {
+
+const line = (a: Pt, b: Pt): Seg => ({ c: false, p0: a, p1: a, p2: b, p3: b });
+
+/** Jarak titik p ke garis lurus a-b */
+function distLine(p: Pt, a: Pt, b: Pt): number {
+  const ab = sub(b, a);
+  const l = len(ab);
+  if (l < 1e-9) return len(sub(p, a));
+  return Math.abs((p.x - a.x) * ab.y - (p.y - a.y) * ab.x) / l;
+}
+
+/** Kurva yang praktis lurus: tubuh kurva (bukan cuma handle) menempel garis a-b */
+function nearlyStraight(s: Seg, d: number, minLen: number): boolean {
+  if (!s.c) return false;
+  const ab = sub(s.p3, s.p0);
+  const l2 = dot(ab, ab);
+  // hanya tepi panjang yang sengaja lurus; potongan pendek (lengkung halus / sudut membulat) dibiarkan
+  if (l2 < minLen * minLen) return false;
+  const ua = unit(ab);
+  if (!ua || dot(startDir(s), ua) < 0.94 || dot(endDir(s), ua) < 0.94) return false;
+  for (const h of [s.p1, s.p2]) {
+    const t = dot(sub(h, s.p0), ab) / l2;
+    if (t < -0.15 || t > 1.15) return false;
+    if (distLine(h, s.p0, s.p3) > d * 2.5) return false;
+  }
+  for (const t of [0.2, 0.4, 0.6, 0.8]) if (distLine(bez(s, t), s.p0, s.p3) > d) return false;
+  return true;
+}
+
+/**
+ * Perapih teks/bentuk geometris:
+ * 1. kurva praktis lurus -> garis
+ * 2. garis berurutan yang segaris -> satu garis
+ * 3. sudut yang membulat kecil (garis, kurva pendek, garis) -> sudut tajam di titik potong
+ */
+function straighten(input: Seg[], tol: number): Seg[] {
+  let a = input.map((sg) => (nearlyStraight(sg, tol * 0.6, tol * 6) ? line(sg.p0, sg.p3) : sg));
+  const cornerMax = tol * 5;
+  const cosMin = Math.cos((120 * Math.PI) / 180);
+  const cosMax = Math.cos((35 * Math.PI) / 180);
+
+  for (let guard = 0; guard < 2000 && a.length >= 3; guard++) {
+    const n = a.length;
+    let changed = false;
+    for (let i = 0; i < n && !changed; i++) {
+      const A = a[i];
+      if (A.c) continue;
+      const B = a[(i + 1) % n];
+
+      // 2. garis + garis segaris
+      if (!B.c) {
+        const da = unit(sub(A.p3, A.p0));
+        const db = unit(sub(B.p3, B.p0));
+        if (da && db && dot(da, db) > 0.9 && distLine(A.p3, A.p0, B.p3) <= tol * 0.5) {
+          const merged = line(A.p0, B.p3);
+          const j = (i + 1) % n;
+          a[i] = merged;
+          a.splice(j, 1);
+          changed = true;
+        }
+        continue;
+      }
+
+      // 3. sudut membulat: A (garis) + 1-2 kurva pendek + C (garis)
+      for (let r = 1; r <= 2 && !changed; r++) {
+        if (n < r + 3) break;
+        let ok = true;
+        for (let q = 1; q <= r; q++) if (!a[(i + q) % n].c) ok = false;
+        const C = a[(i + r + 1) % n];
+        if (!ok || C.c) continue;
+        const start = a[(i + 1) % n].p0;
+        const end = a[(i + r) % n].p3;
+        const span = len(sub(end, start));
+        let arc = 0;
+        for (let q = 1; q <= r; q++) {
+          const g = a[(i + q) % n];
+          arc += len(sub(g.p1, g.p0)) + len(sub(g.p2, g.p1)) + len(sub(g.p3, g.p2));
+        }
+        if (span > cornerMax || arc > cornerMax * 2.5) continue;
+        const da = unit(sub(A.p3, A.p0));
+        const dc = unit(sub(C.p3, C.p0));
+        if (!da || !dc) continue;
+        if (len(sub(A.p3, A.p0)) < tol * 2 || len(sub(C.p3, C.p0)) < tol * 2) continue;
+        const cs = dot(da, dc);
+        if (cs > cosMax || cs < cosMin) continue;
+        const cr = da.x * dc.y - da.y * dc.x;
+        if (Math.abs(cr) < 1e-6) continue;
+        const w = sub(C.p0, A.p0);
+        const t = (w.x * dc.y - w.y * dc.x) / cr;
+        const X = add(A.p0, mul(da, t));
+        if (len(sub(X, start)) > cornerMax * 1.5 || len(sub(X, end)) > cornerMax * 1.5) continue;
+        const iA = i;
+        const iC = (i + r + 1) % n;
+        a[iA] = line(A.p0, X);
+        a[iC] = line(X, C.p3);
+        // buang kurva di antara A dan C (indeks i+1 .. i+r, melingkar)
+        const drop = new Set<number>();
+        for (let q = 1; q <= r; q++) drop.add((i + q) % n);
+        a = a.filter((_, idx) => !drop.has(idx));
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  return a;
+}
+
+function mergeCurves(segs: Seg[], tol: number): Seg[] {
   const n = segs.length;
   if (n < 2) return segs;
   // Putar awal path ke sambungan yang tidak mulus (sudut) supaya kurva tidak terbelah di tengah sisi mulus
@@ -248,6 +355,11 @@ function simplifySub(segs: Seg[], tol: number): Seg[] {
     i = last + 1;
   }
   return out;
+}
+
+/** Tahap: rapikan garis/sudut dulu, lalu gabung kurva sisanya, lalu rapikan lagi */
+function simplifySub(segs: Seg[], tol: number): Seg[] {
+  return straighten(mergeCurves(straighten(segs, tol), tol), tol);
 }
 
 function parse(d: string): Seg[][] | null {
