@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { Potrace } from "potrace";
 import { assignPalette, buildPalette, softAssign } from "./quantize";
+import { edgeSmooth } from "./denoise";
 import { ellipseTag, snapEllipses } from "./shapes";
 
 export type LayeredOptions = {
@@ -18,6 +19,10 @@ export type LayeredOptions = {
   alphaMax?: number;
   /** Ubah bentuk yang hampir bulat/lonjong jadi lingkaran/elips sempurna */
   snap?: boolean;
+  /** Hapus derau JPEG/gradasi lembut dengan penghalus yang menjaga tepi (default aktif) */
+  denoise?: boolean;
+  /** Warna palet yang jaraknya (RGB) kurang dari ini digabung jadi satu (default 12) */
+  mergeDist?: number;
 };
 
 const loadTrace = (buf: Buffer, params: Record<string, unknown>) =>
@@ -49,9 +54,11 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const clean = await sharp(input).ensureAlpha().median(3).png().toBuffer();
   const orig = await sharp(clean).raw().toBuffer({ resolveWithObject: true });
   const ch = orig.info.channels;
-  const palette = buildPalette(orig.data, ch, o.colors);
+  // Penghalus penjaga tepi: derau JPEG & gradasi lembut hilang, tepi tetap tajam
+  const px = o.denoise === false ? orig.data : edgeSmooth(orig.data, ch, W0, H0, { radius: 2, tol: 28, passes: 2 });
+  const palette = buildPalette(px, ch, o.colors);
   if (!palette.length) throw new Error("Gambar kosong.");
-  let ids = assignPalette(orig.data, ch, palette);
+  let ids = assignPalette(px, ch, palette);
 
   // Buang warna transisi anti-alias: hampir semua pikselnya berada di batas dua area
   for (let pass = 0; pass < 2 && palette.length > 2; pass++) {
@@ -70,7 +77,31 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     if (keep.length === palette.length || keep.length < 2) break;
     palette.length = 0;
     palette.push(...keep);
-    ids = assignPalette(orig.data, ch, palette);
+    ids = assignPalette(px, ch, palette);
+  }
+
+  // Gabungkan warna yang nyaris sama (nuansa kulit/langit): mencegah tepi bercak di gradasi lembut
+  const md2 = (o.mergeDist ?? 12) ** 2;
+  if (md2 > 0 && palette.length > 2) {
+    const cnt = new Array<number>(palette.length).fill(0);
+    for (let i = 0; i < N0; i++) if (ids[i] >= 0) cnt[ids[i]]++;
+    const bySize = palette.map((_, i) => i).sort((a, b) => cnt[b] - cnt[a]);
+    const keep: number[] = [];
+    for (const i of bySize) {
+      const c = palette[i];
+      const near = keep.some((k) => {
+        const dr = (c >> 16) - (k >> 16);
+        const dg = ((c >> 8) & 255) - ((k >> 8) & 255);
+        const db = (c & 255) - (k & 255);
+        return dr * dr + dg * dg + db * db < md2;
+      });
+      if (!near) keep.push(c);
+    }
+    if (keep.length < palette.length) {
+      palette.length = 0;
+      palette.push(...keep);
+      ids = assignPalette(px, ch, palette);
+    }
   }
 
   // Urutkan dari area terbesar (lapisan paling bawah); indeks palet = peringkat
@@ -78,7 +109,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   for (let i = 0; i < N0; i++) if (ids[i] >= 0) counts[ids[i]]++;
   const order = palette.map((_, i) => i).sort((a, b) => counts[b] - counts[a]);
   const ranked = order.map((i) => palette[i]);
-  const soft = softAssign(orig.data, ch, ranked, W0, H0);
+  const soft = softAssign(px, ch, ranked, W0, H0);
   const cover = new Uint8Array(N0); // alpha asli 0-255
   for (let i = 0; i < N0; i++) cover[i] = ch === 4 ? orig.data[i * ch + 3] : 255;
 

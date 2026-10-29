@@ -70,6 +70,8 @@ export async function POST(req: Request) {
           alphaMax: 1 + 0.04 * smooth,
           // bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (default aktif)
           snap: s.snap !== false,
+          denoise: true,
+          mergeDist: 12,
         });
       } else {
         engine = "detail";
