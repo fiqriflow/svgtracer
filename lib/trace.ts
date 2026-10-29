@@ -1,7 +1,10 @@
 export type Mode = "color" | "bw";
+export type Engine = "auto" | "smooth" | "detail";
 
 export type TraceSettings = {
   mode: Mode;
+  /** Metode tracing mode warna: otomatis memilih berdasarkan gambar */
+  engine: Engine;
   /** Jumlah warna maksimum (mode warna) */
   colors: number;
   /** Buang bintik kecil (px) */
@@ -15,13 +18,14 @@ export type TraceSettings = {
 /** Preset awal: cocok untuk ilustrasi/maskot flat, minim gradasi */
 export const DEFAULT_SETTINGS: TraceSettings = {
   mode: "color",
-  colors: 64,
+  engine: "auto",
+  colors: 24,
   speckles: 8,
   smooth: 1.5,
   threshold: 128,
 };
 
-export type TraceResult = { svg: string; bytes: number; paths: number };
+export type TraceResult = { svg: string; bytes: number; paths: number; engine: string };
 
 /** Sisi terpanjang gambar yang dikirim ke server (batas body Vercel 4,5 MB) */
 export const MAX_SIDE = 2000;
@@ -62,7 +66,12 @@ export async function traceImage(
     throw new Error(msg || `Tracing gagal (${res.status})`);
   }
   const svg = await res.text();
-  return { svg, bytes: new Blob([svg]).size, paths: (svg.match(/<path/g) ?? []).length };
+  return {
+    svg,
+    bytes: new Blob([svg]).size,
+    paths: (svg.match(/<path/g) ?? []).length,
+    engine: res.headers.get("X-Engine") ?? "",
+  };
 }
 
 export function formatBytes(n: number): string {

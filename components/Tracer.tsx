@@ -271,6 +271,34 @@ export default function Tracer() {
                   ))}
                 </div>
               </div>
+              {settings.mode === "color" && (
+                <div className="sm:col-span-2">
+                  <p className="mb-1 text-sm font-medium">Metode</p>
+                  <div className="grid max-w-md grid-cols-3 gap-1 rounded-md bg-paper p-1" role="group" aria-label="Metode tracing">
+                    {([
+                      ["auto", "Otomatis"],
+                      ["smooth", "Halus"],
+                      ["detail", "Detail"],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={settings.engine === value}
+                        onClick={() => set("engine", value)}
+                        className={`rounded px-3 py-1.5 text-sm transition-colors ${
+                          settings.engine === value ? "bg-ink text-white" : "text-mute hover:text-ink"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-1 text-xs text-mute">
+                    Halus: kontur bersih untuk logo/ikon/maskot flat. Detail: untuk gambar berderau atau bergradasi.
+                    {result?.engine && settings.engine === "auto" && ` Terpilih: ${result.engine === "smooth" ? "Halus" : "Detail"}.`}
+                  </p>
+                </div>
+              )}
               {SLIDERS.filter((sl) => sl.modes.includes(settings.mode)).map((sl) => (
                 <div key={sl.key}>
                   <label htmlFor={sl.key} className="flex items-baseline justify-between text-sm font-medium">

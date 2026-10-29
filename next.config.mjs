@@ -2,7 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   // vtracer memuat file .wasm dari node_modules, jangan di-bundle
-  serverExternalPackages: ["@visioncortex/vtracer", "sharp"],
+  serverExternalPackages: ["sharp", "potrace", "jimp", "@visioncortex/vtracer"],
 };
 
 export default nextConfig;

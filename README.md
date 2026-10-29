@@ -1,42 +1,17 @@
 # SVG Tracer
 
-Web app untuk mengubah PNG menjadi SVG vektor (tracing). Semua proses jalan di browser, file tidak diunggah ke server.
+Upload PNG/JPG -> SVG otomatis siap diunduh. Pemrosesan di API route `/api/trace` (Node).
 
-## Stack
+Mode Warna punya 2 metode (otomatis memilih):
+- Halus: tracing berlapis per warna + Potrace. Kontur sangat mulus, untuk logo/ikon/maskot flat bersih.
+- Detail: VTracer. Untuk gambar berderau atau bergradasi halus.
 
-- Next.js (App Router) + TypeScript
-- Tailwind CSS
-- [imagetracerjs](https://github.com/jankovicsandras/imagetracerjs) untuk tracing
-- Deploy: Vercel
-- Supabase: belum dipakai (opsional, lihat `.env.example`)
+Mode Hitam-putih: Potrace satu lapis (ikon satu warna).
 
-## Jalankan lokal
+Batas upload 4 MB (gambar besar otomatis dikecilkan di browser).
 
-```bash
+## Jalankan
 npm install
 npm run dev
-```
 
-Buka http://localhost:3000
-
-## Deploy ke Vercel
-
-1. Push repo ke GitHub.
-2. Di Vercel: Add New > Project > pilih repo.
-3. Framework terdeteksi otomatis (Next.js). Klik Deploy.
-
-## Struktur
-
-```
-app/            layout, halaman, CSS global
-components/     Tracer.tsx (UI: upload, slider, preview, unduh)
-lib/trace.ts    logika tracing + pengaturan
-types/          deklarasi tipe imagetracerjs
-```
-
-## Ide lanjutan
-
-- Riwayat file / akun lewat Supabase
-- Pilihan ukuran maksimum gambar (`MAX_SIDE` di `lib/trace.ts`)
-- Preset (logo, ikon, sketsa)
-- Optimasi SVG (SVGO)
+Deploy: Vercel (Node runtime). `sharp`, `potrace`, `@visioncortex/vtracer` dimuat sebagai external package.
