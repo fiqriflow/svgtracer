@@ -135,7 +135,7 @@ function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: num
   const closeTo = (a: number, b: number) => {
     const c = palette[a];
     const d = palette[b];
-    return Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255)) < 32;
+    return Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255)) < 24;
   };
   const N = W * H;
   const lab = new Int32Array(N).fill(-1);
@@ -232,7 +232,6 @@ function smoothCloseClasses(px: Uint8Array, ch: number, ids: Int16Array, palette
   const close: boolean[][] = palette.map((c, i) =>
     palette.map((d, j) => i === j || Math.hypot((c >> 16) - (d >> 16), ((c >> 8) & 255) - ((d >> 8) & 255), (c & 255) - (d & 255)) < closeDist),
   );
-  const votes = new Int32Array(K);
   for (let pass = 0; pass < passes; pass++) {
     const next = ids.slice();
     for (let y = 0; y < H; y++) {
@@ -247,19 +246,47 @@ function smoothCloseClasses(px: Uint8Array, ch: number, ids: Int16Array, palette
         const d = y < H - 1 ? ids[i + W] : c;
         const diff = (l !== c && l >= 0 && close[c][l]) || (r !== c && r >= 0 && close[c][r]) || (u !== c && u >= 0 && close[c][u]) || (d !== c && d >= 0 && close[c][d]);
         if (!diff) continue;
-        votes.fill(0);
+        // Rata-rata warna piksel berkelas mirip di sekitar -> kelas mirip terdekat dengan rata-rata itu.
+        // Zona gradasi yang jatuh di antara dua warna palet jadi satu keputusan yang stabil.
+        let sr = 0;
+        let sg = 0;
+        let sb = 0;
+        let cnt = 0;
         for (let dy = -radius; dy <= radius; dy++) {
           const yy = y + dy;
           if (yy < 0 || yy >= H) continue;
           for (let dx = -radius; dx <= radius; dx++) {
             const xx = x + dx;
             if (xx < 0 || xx >= W) continue;
-            const k = ids[yy * W + xx];
-            if (k >= 0 && close[c][k]) votes[k]++;
+            const j = yy * W + xx;
+            const k = ids[j];
+            if (k >= 0 && close[c][k]) {
+              sr += px[j * ch];
+              sg += px[j * ch + 1];
+              sb += px[j * ch + 2];
+              cnt++;
+            }
           }
         }
         let best = c;
-        for (let k = 0; k < K; k++) if (votes[k] > votes[best]) best = k;
+        if (cnt > 0) {
+          sr /= cnt;
+          sg /= cnt;
+          sb /= cnt;
+          let bd = Infinity;
+          for (let k = 0; k < K; k++) {
+            if (!close[c][k]) continue;
+            const col = palette[k];
+            const er = sr - (col >> 16);
+            const eg = sg - ((col >> 8) & 255);
+            const eb = sb - (col & 255);
+            const e = er * er + eg * eg + eb * eb;
+            if (e < bd) {
+              bd = e;
+              best = k;
+            }
+          }
+        }
         if (best !== c) next[i] = best;
       }
     }
@@ -432,7 +459,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const cleanArea = Math.round((o.cleanArea ?? 0) * Math.max(1, Math.sqrt(N0 / 250000)));
   cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea);
   if ((o.closeSmooth ?? 0) > 0) {
-    smoothCloseClasses(px, ch, ids, palette, W0, H0, Math.max(2, Math.round(Math.max(W0, H0) / 600)), 32, o.closeSmooth ?? 0);
+    smoothCloseClasses(px, ch, ids, palette, W0, H0, Math.max(3, Math.round(Math.max(W0, H0) / 300)), 24, o.closeSmooth ?? 0);
     cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, cleanArea * 12);
     openCloseClasses(px, ch, ids, palette, W0, H0, Math.round(o.openClose ?? 0));
   }
@@ -514,7 +541,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     const shapes = o.snap ? snapEllipses(blurred, w, h, { minArea: 20 * o.scale * o.scale }) : [];
     if ((o.tracer ?? "own") === "own") {
       const d = traceField(blurred, w, h, {
-        turd: o.turd,
+        turd: o.turd * 10, // bentuk/lubang mungil (titik sisa) dibuang
         err: o.fitErr ?? 0.8,
         corner: o.corner ?? 50,
         win: 3 + 1.2 * o.scale,
