@@ -7,7 +7,7 @@ import { flatness } from "@/lib/quantize";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const MAX_BYTES = 4 * 1024 * 1024;
+const MAX_BYTES = 4.2 * 1024 * 1024;
 /** Sisi terpanjang target untuk tracing; gambar kecil di-upscale sampai sini (maks 2x) */
 const TARGET_SIDE = 1400;
 /** Gambar dianggap "flat bersih" bila 16 warna dominan mencakup porsi ini */
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
     const form = await req.formData();
     const file = form.get("file");
     if (!(file instanceof Blob)) return new NextResponse("File tidak ada.", { status: 400 });
-    if (file.size > MAX_BYTES) return new NextResponse("File terlalu besar (maks 4 MB).", { status: 413 });
+    if (file.size > MAX_BYTES) return new NextResponse("File terlalu besar (maks sekitar 4 MB).", { status: 413 });
 
     let s: Record<string, unknown> = {};
     try {

@@ -8,7 +8,7 @@ Mode Warna punya 2 metode (otomatis memilih):
 
 Mode Hitam-putih: Potrace satu lapis (ikon satu warna).
 
-Batas upload 4 MB (gambar besar otomatis dikecilkan di browser).
+Gambar besar otomatis dikecilkan di browser (batas body Vercel ~4,5 MB).
 
 ## Jalankan
 npm install

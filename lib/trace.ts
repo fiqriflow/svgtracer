@@ -27,29 +27,38 @@ export const DEFAULT_SETTINGS: TraceSettings = {
 
 export type TraceResult = { svg: string; bytes: number; paths: number; engine: string };
 
-/** Sisi terpanjang gambar yang dikirim ke server (batas body Vercel 4,5 MB) */
-export const MAX_SIDE = 2000;
-const MAX_UPLOAD = 4 * 1024 * 1024;
+/** Sisi terpanjang gambar yang dikirim; server hanya memakai sekitar 1400 px, jadi lebih besar tidak berguna */
+export const MAX_SIDE = 1600;
+/** Batas ukuran upload; body fungsi Vercel maksimal sekitar 4,5 MB (termasuk overhead form) */
+const MAX_UPLOAD = 3.5 * 1024 * 1024;
 
-/** Kirim file apa adanya; kalau terlalu besar, kecilkan dulu lewat canvas. */
+const toBlob = (canvas: HTMLCanvasElement) =>
+  new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
+
+/** Kirim file apa adanya bila kecil; kalau terlalu besar, kecilkan bertahap sampai muat. */
 export async function prepareUpload(file: File): Promise<Blob> {
   const bitmap = await createImageBitmap(file);
-  const long = Math.max(bitmap.width, bitmap.height);
-  if (file.size <= MAX_UPLOAD && long <= MAX_SIDE) {
+  try {
+    const long = Math.max(bitmap.width, bitmap.height);
+    if (file.size <= MAX_UPLOAD && long <= MAX_SIDE) return file;
+
+    let ratio = Math.min(1, MAX_SIDE / long);
+    for (let i = 0; i < 8; i++) {
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(bitmap.width * ratio));
+      canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("Canvas tidak tersedia di browser ini.");
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      const blob = await toBlob(canvas);
+      if (!blob) throw new Error("Gagal memproses gambar.");
+      if (blob.size <= MAX_UPLOAD) return blob;
+      ratio *= 0.8; // masih terlalu besar: kecilkan lagi
+    }
+    throw new Error("Gambar terlalu besar. Coba gambar yang lebih kecil.");
+  } finally {
     bitmap.close();
-    return file;
   }
-  const ratio = Math.min(1, MAX_SIDE / long);
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.round(bitmap.width * ratio));
-  canvas.height = Math.max(1, Math.round(bitmap.height * ratio));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas tidak tersedia di browser ini.");
-  ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
-  const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/png"));
-  if (!blob) throw new Error("Gagal memproses gambar.");
-  return blob;
 }
 
 export async function traceImage(
@@ -61,6 +70,7 @@ export async function traceImage(
   form.append("file", image, "image.png");
   form.append("settings", JSON.stringify(s));
   const res = await fetch("/api/trace", { method: "POST", body: form, signal });
+  if (res.status === 413) throw new Error("Gambar terlalu besar. Coba gambar yang lebih kecil.");
   if (!res.ok) {
     const msg = await res.text().catch(() => "");
     throw new Error(msg || `Tracing gagal (${res.status})`);

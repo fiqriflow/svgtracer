@@ -160,7 +160,7 @@ export default function Tracer() {
         >
           <p className="text-xl font-semibold">Seret PNG ke sini</p>
           <p className="text-sm text-mute">atau klik untuk memilih file, atau tempel dengan Ctrl+V</p>
-          <p className="text-xs text-mute">Logo, ikon, dan ilustrasi flat memberi hasil terbaik. Maks 4 MB.</p>
+          <p className="text-xs text-mute">Logo, ikon, dan ilustrasi flat memberi hasil terbaik. Gambar besar otomatis dikecilkan.</p>
         </div>
       ) : (
         <>
