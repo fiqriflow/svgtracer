@@ -13,6 +13,8 @@ export type TraceSettings = {
   smooth: number;
   /** Batas gelap 0-255 (mode hitam-putih) */
   threshold: number;
+  /** Bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (mode warna, metode Halus) */
+  snap: boolean;
 };
 
 /** Preset awal: cocok untuk ilustrasi/maskot flat, minim gradasi */
@@ -23,6 +25,7 @@ export const DEFAULT_SETTINGS: TraceSettings = {
   speckles: 8,
   smooth: 1.5,
   threshold: 128,
+  snap: true,
 };
 
 export type TraceResult = { svg: string; bytes: number; paths: number; engine: string };

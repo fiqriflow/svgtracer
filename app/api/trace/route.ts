@@ -65,7 +65,11 @@ export async function POST(req: Request) {
           // sigma blur dalam px gambar asli: slider "haluskan" 0-5 -> 0,3-1,4 px
           blur: 0.3 + 0.22 * smooth,
           turd: speckles * Math.round(scale * 2),
-          opt: 0.4,
+          // kurva Potrace: makin tinggi "haluskan" makin sedikit simpul & sudut makin lembut
+          opt: 0.5 + 0.1 * smooth,
+          alphaMax: 1 + 0.04 * smooth,
+          // bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (default aktif)
+          snap: s.snap !== false,
         });
       } else {
         engine = "detail";

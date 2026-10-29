@@ -136,7 +136,7 @@ export function assignPalette(rgba: Uint8Array, channels: number, palette: numbe
 }
 
 export type SoftMap = {
-  /** Indeks palet terdekat */
+  /** Indeks palet utama */
   a: Int16Array;
   /** Indeks palet kedua (warna di seberang tepi) */
   b: Int16Array;
@@ -147,9 +147,12 @@ export type SoftMap = {
 /**
  * Penugasan lembut: tiap piksel = campuran 2 warna palet (a, b) dengan bobot.
  * Piksel anti-alias di tepi membawa posisi tepi sub-piksel, jadi kontur tidak bergerigi.
- * Warna kedua dipilih dari 4 tetangga terdekat yang paling pas berada di garis a-b.
+ *
+ * Pasangan warna untuk piksel tepi dipilih dari warna piksel MURNI di sekitarnya (5x5),
+ * bukan dari palet global: warna antara yang kebetulan ada di palet (mis. cokelat telinga
+ * yang terletak di antara hitam dan cokelat wajah) tidak boleh mengacaukan tepi.
  */
-export function softAssign(rgba: Uint8Array, channels: number, palette: number[]): SoftMap {
+export function softAssign(rgba: Uint8Array, channels: number, palette: number[], width: number, height: number): SoftMap {
   const n = rgba.length / channels;
   const K = palette.length;
   const pr = palette.map((c) => c >> 16);
@@ -158,75 +161,106 @@ export function softAssign(rgba: Uint8Array, channels: number, palette: number[]
   const a = new Int16Array(n);
   const b = new Int16Array(n);
   const w = new Uint8Array(n);
+  const pure = new Uint8Array(n);
+  const PURE_D2 = 64; // piksel dianggap murni bila <= ~8 level dari warna palet
 
-  const SZ = 1 << 21; // kunci 7-bit per kanal
+  // Pass 1: warna palet terdekat (cache 7-bit per kanal)
+  const SZ = 1 << 21;
   const cA = new Int16Array(SZ).fill(-1);
-  const cB = new Int16Array(SZ);
-  const cW = new Uint8Array(SZ);
-
-  const M = Math.min(5, K);
-  const top = new Int32Array(M);
-  const td = new Float64Array(M);
-
+  const cD = new Float32Array(SZ);
   for (let i = 0; i < n; i++) {
     const o = i * channels;
-    const r0 = rgba[o];
-    const g0 = rgba[o + 1];
-    const b0 = rgba[o + 2];
-    const key = ((r0 >> 1) << 14) | ((g0 >> 1) << 7) | (b0 >> 1);
+    const r = rgba[o];
+    const g = rgba[o + 1];
+    const bl = rgba[o + 2];
+    const key = ((r >> 1) << 14) | ((g >> 1) << 7) | (bl >> 1);
     if (cA[key] < 0) {
-      const r = (r0 & 254) | 1;
-      const g = (g0 & 254) | 1;
-      const bl = (b0 & 254) | 1;
-      // M palet terdekat (urut naik)
-      let cnt = 0;
+      let best = 0;
+      let bd = Infinity;
       for (let p = 0; p < K; p++) {
         const dr = r - pr[p];
         const dg = g - pg[p];
         const db = bl - pb[p];
         const d = dr * dr + dg * dg + db * db;
-        if (cnt < M || d < td[cnt - 1]) {
-          let j = cnt < M ? cnt++ : M - 1;
-          while (j > 0 && td[j - 1] > d) {
-            td[j] = td[j - 1];
-            top[j] = top[j - 1];
-            j--;
-          }
-          td[j] = d;
-          top[j] = p;
+        if (d < bd) {
+          bd = d;
+          best = p;
         }
       }
-      const A = top[0];
-      let bestB = A;
-      let bestW = 0;
-      let bestPerp = Infinity;
-      for (let j = 1; j < cnt; j++) {
-        const B = top[j];
-        const vx = pr[B] - pr[A];
-        const vy = pg[B] - pg[A];
-        const vz = pb[B] - pb[A];
-        const vv = vx * vx + vy * vy + vz * vz;
-        if (vv === 0) continue;
-        const t = ((r - pr[A]) * vx + (g - pg[A]) * vy + (bl - pb[A]) * vz) / vv;
-        if (t < -0.05 || t > 1.05) continue;
-        const tc = t < 0 ? 0 : t > 1 ? 1 : t;
-        const ex = r - (pr[A] + tc * vx);
-        const ey = g - (pg[A] + tc * vy);
-        const ez = bl - (pb[A] + tc * vz);
-        const perp = ex * ex + ey * ey + ez * ez;
-        if (perp < bestPerp) {
-          bestPerp = perp;
-          bestB = B;
-          bestW = Math.round(tc * 255);
-        }
-      }
-      cA[key] = A;
-      cB[key] = bestB;
-      cW[key] = bestW;
+      cA[key] = best;
+      cD[key] = bd;
     }
     a[i] = cA[key];
-    b[i] = cB[key];
-    w[i] = cW[key];
+    b[i] = cA[key];
+    if (cD[key] <= PURE_D2 && !(channels === 4 && rgba[o + 3] < 128)) pure[i] = 1;
+  }
+
+  // Pass 2: piksel tepi -> pasangan terbaik dari kelas piksel murni di sekitarnya
+  const cls = new Int32Array(6);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const i = y * width + x;
+      if (pure[i]) continue;
+      const o = i * channels;
+      const r = rgba[o];
+      const g = rgba[o + 1];
+      const bl = rgba[o + 2];
+      let m = 0;
+      for (let dy = -2; dy <= 2; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= height) continue;
+        for (let dx = -2; dx <= 2; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= width) continue;
+          const j = yy * width + xx;
+          if (!pure[j]) continue;
+          const c = a[j];
+          let seen = false;
+          for (let k = 0; k < m; k++) if (cls[k] === c) seen = true;
+          if (!seen && m < 6) cls[m++] = c;
+        }
+      }
+      let bestA = a[i];
+      let bestB = a[i];
+      let bestW = 0;
+      let bestPerp = Infinity;
+      if (m >= 2) {
+        for (let u = 0; u < m; u++) {
+          for (let v = 0; v < m; v++) {
+            if (u === v) continue;
+            const A = cls[u];
+            const B = cls[v];
+            const vx = pr[B] - pr[A];
+            const vy = pg[B] - pg[A];
+            const vz = pb[B] - pb[A];
+            const vv = vx * vx + vy * vy + vz * vz;
+            if (vv === 0) continue;
+            const t = ((r - pr[A]) * vx + (g - pg[A]) * vy + (bl - pb[A]) * vz) / vv;
+            if (t < -0.05 || t > 1.05) continue;
+            const tc = t < 0 ? 0 : t > 1 ? 1 : t;
+            const ex = r - (pr[A] + tc * vx);
+            const ey = g - (pg[A] + tc * vy);
+            const ez = bl - (pb[A] + tc * vz);
+            const perp = ex * ex + ey * ey + ez * ez;
+            if (perp < bestPerp) {
+              bestPerp = perp;
+              bestA = A;
+              bestB = B;
+              bestW = Math.round(tc * 255);
+            }
+          }
+        }
+      }
+      if (bestPerp === Infinity) {
+        // Tidak ada pasangan lokal yang cocok: pakai warna palet terdekat saja
+        bestA = a[i];
+        bestB = a[i];
+        bestW = 0;
+      }
+      a[i] = bestA;
+      b[i] = bestB;
+      w[i] = bestW;
+    }
   }
   return { a, b, w };
 }

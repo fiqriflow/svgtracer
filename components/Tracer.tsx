@@ -299,6 +299,19 @@ export default function Tracer() {
                   </p>
                 </div>
               )}
+              {settings.mode === "color" && (
+                <label className="flex items-center gap-2 text-sm sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={settings.snap}
+                    onChange={(e) => set("snap", e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium">Sempurnakan bentuk</span>
+                    <span className="text-mute"> — bulat/lonjong jadi lingkaran/elips sempurna</span>
+                  </span>
+                </label>
+              )}
               {SLIDERS.filter((sl) => sl.modes.includes(settings.mode)).map((sl) => (
                 <div key={sl.key}>
                   <label htmlFor={sl.key} className="flex items-baseline justify-between text-sm font-medium">

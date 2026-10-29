@@ -1,6 +1,7 @@
 import sharp from "sharp";
 import { Potrace } from "potrace";
 import { assignPalette, buildPalette, softAssign } from "./quantize";
+import { ellipseTag, snapEllipses } from "./shapes";
 
 export type LayeredOptions = {
   /** Jumlah warna palet (mode warna) */
@@ -13,6 +14,10 @@ export type LayeredOptions = {
   turd: number;
   /** Toleransi optimasi kurva Potrace */
   opt: number;
+  /** Batas sudut Potrace (makin besar makin mulus, sudut makin bulat) */
+  alphaMax?: number;
+  /** Ubah bentuk yang hampir bulat/lonjong jadi lingkaran/elips sempurna */
+  snap?: boolean;
 };
 
 const loadTrace = (buf: Buffer, params: Record<string, unknown>) =>
@@ -73,7 +78,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   for (let i = 0; i < N0; i++) if (ids[i] >= 0) counts[ids[i]]++;
   const order = palette.map((_, i) => i).sort((a, b) => counts[b] - counts[a]);
   const ranked = order.map((i) => palette[i]);
-  const soft = softAssign(orig.data, ch, ranked);
+  const soft = softAssign(orig.data, ch, ranked, W0, H0);
   const cover = new Uint8Array(N0); // alpha asli 0-255
   for (let i = 0; i < N0; i++) cover[i] = ch === 4 ? orig.data[i * ch + 3] : 255;
 
@@ -96,8 +101,15 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       .toColourspace("b-w") // paksa 1 kanal (default sharp: 3 kanal)
       .raw()
       .toBuffer();
-    const png = await sharp(big, { raw: { width: w, height: h, channels: 1 } })
+    const blurred = await sharp(big, { raw: { width: w, height: h, channels: 1 } })
       .blur(sigma)
+      .toColourspace("b-w")
+      .raw()
+      .toBuffer();
+    const color = hex(ranked[r]);
+    // Bentuk bulat/lonjong -> elips sempurna; sisanya lewat Potrace
+    const shapes = o.snap ? snapEllipses(blurred, w, h, { minArea: 20 * o.scale * o.scale }) : [];
+    const png = await sharp(blurred, { raw: { width: w, height: h, channels: 1 } })
       .toColourspace("b-w")
       .png()
       .toBuffer();
@@ -106,10 +118,12 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       blackOnWhite: true,
       turdSize: o.turd,
       optTolerance: o.opt,
-      alphaMax: 1,
+      alphaMax: o.alphaMax ?? 1,
       optCurve: true,
     });
-    paths += p.getPathTag(hex(ranked[r]));
+    const tag = p.getPathTag(color);
+    if (!tag.includes(' d=""')) paths += tag;
+    for (const e of shapes) paths += ellipseTag(e, color);
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${paths}</svg>`;
