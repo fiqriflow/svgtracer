@@ -201,7 +201,7 @@ function nearlyStraight(s: Seg, d: number, minLen: number): boolean {
  * 3. sudut yang membulat kecil (garis, kurva pendek, garis) -> sudut tajam di titik potong
  */
 function straighten(input: Seg[], tol: number): Seg[] {
-  let a = input.map((sg) => (nearlyStraight(sg, tol * 0.6, tol * 6) ? line(sg.p0, sg.p3) : sg));
+  let a = input.map((sg) => (nearlyStraight(sg, tol * 0.6, tol * 30) ? line(sg.p0, sg.p3) : sg));
   const cornerMax = tol * 5;
   const cosMin = Math.cos((120 * Math.PI) / 180);
   const cosMax = Math.cos((35 * Math.PI) / 180);
@@ -357,8 +357,353 @@ function mergeCurves(segs: Seg[], tol: number): Seg[] {
   return out;
 }
 
+
+/* ---------- Deteksi garis lurus pada titik padat kontur (untuk teks / bentuk geometris) ---------- */
+
+type Run = { i: number; j: number; a: Pt; b: Pt };
+
+function flatten(segs: Seg[], step: number): Pt[] {
+  const pts: Pt[] = [];
+  for (const s of segs) {
+    const L = s.c ? len(sub(s.p1, s.p0)) + len(sub(s.p2, s.p1)) + len(sub(s.p3, s.p2)) : len(sub(s.p3, s.p0));
+    const m = Math.max(1, Math.ceil(L / step));
+    for (let k = 0; k < m; k++) {
+      const t = k / m;
+      pts.push(s.c ? bez(s, t) : { x: s.p0.x + (s.p3.x - s.p0.x) * t, y: s.p0.y + (s.p3.y - s.p0.y) * t });
+    }
+  }
+  return pts;
+}
+
+/** Simpangan maks semua titik i..j (termasuk ujung) terhadap garis TLS-nya, plus apakah semuanya di satu sisi */
+function lineStats(P: Pt[], i: number, j: number): { dev: number; oneSided: number } {
+  const N = P.length;
+  const m = j - i + 1;
+  let cx = 0;
+  let cy = 0;
+  for (let k = i; k <= j; k++) {
+    cx += P[k % N].x;
+    cy += P[k % N].y;
+  }
+  cx /= m;
+  cy /= m;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (let k = i; k <= j; k++) {
+    const dx = P[k % N].x - cx;
+    const dy = P[k % N].y - cy;
+    sxx += dx * dx;
+    syy += dy * dy;
+    sxy += dx * dy;
+  }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  const nx = -Math.sin(th);
+  const ny = Math.cos(th);
+  let dev = 0;
+  let pos = 0;
+  let neg = 0;
+  for (let k = i; k <= j; k++) {
+    const sd = (P[k % N].x - cx) * nx + (P[k % N].y - cy) * ny;
+    const d = Math.abs(sd);
+    if (d > dev) dev = d;
+    if (d > 0.02) (sd > 0 ? pos++ : neg++);
+  }
+  const tot = pos + neg;
+  return { dev, oneSided: tot ? Math.max(pos, neg) / tot : 0 };
+}
+
+/** Seberapa "melengkung" titik i..j terhadap tali busur: simpangan maks dan porsi titik di satu sisi (busur = hampir semua satu sisi) */
+function chordBow(P: Pt[], i: number, j: number): { dev: number; oneSided: number } {
+  const N = P.length;
+  const a = P[i % N];
+  const b = P[j % N];
+  const ab = sub(b, a);
+  const l = len(ab);
+  if (l < 1e-9) return { dev: Infinity, oneSided: 1 };
+  let dev = 0;
+  let pos = 0;
+  let neg = 0;
+  for (let k = i + 1; k < j; k++) {
+    const q = P[k % N];
+    const sd = ((q.x - a.x) * ab.y - (q.y - a.y) * ab.x) / l;
+    if (Math.abs(sd) > dev) dev = Math.abs(sd);
+    if (Math.abs(sd) > 0.01) (sd > 0 ? pos++ : neg++);
+  }
+  const tot = pos + neg;
+  return { dev, oneSided: tot ? Math.max(pos, neg) / tot : 0 };
+}
+
+/** Garis kuadrat terkecil total (TLS) lewat titik i..j, arah searah a->b; ujung = proyeksi titik awal/akhir; sumbu dikunci bila nyaris tegak/datar */
+function fitLineRun(P: Pt[], i: number, j: number): Run {
+  const N = P.length;
+  let cx = 0;
+  let cy = 0;
+  const m = j - i + 1;
+  for (let k = i; k <= j; k++) {
+    cx += P[k % N].x;
+    cy += P[k % N].y;
+  }
+  cx /= m;
+  cy /= m;
+  let sxx = 0;
+  let syy = 0;
+  let sxy = 0;
+  for (let k = i; k <= j; k++) {
+    const dx = P[k % N].x - cx;
+    const dy = P[k % N].y - cy;
+    sxx += dx * dx;
+    syy += dy * dy;
+    sxy += dx * dy;
+  }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  let d: Pt = { x: Math.cos(th), y: Math.sin(th) };
+  const chord = sub(P[j % N], P[i % N]);
+  if (dot(d, chord) < 0) d = mul(d, -1);
+  let c: Pt = { x: cx, y: cy };
+  const AX = Math.sin((1.5 * Math.PI) / 180);
+  if (Math.abs(d.y) < AX) d = { x: d.x > 0 ? 1 : -1, y: 0 }; // datar persis
+  else if (Math.abs(d.x) < AX) d = { x: 0, y: d.y > 0 ? 1 : -1 }; // tegak persis
+  const proj = (q: Pt): Pt => add(c, mul(d, dot(sub(q, c), d)));
+  c = { x: cx, y: cy };
+  return { i, j, a: proj(P[i % N]), b: proj(P[j % N]) };
+}
+
+/** Schneider: fit deretan titik jadi satu/lebih kurva Bezier dengan tangen ujung tetap */
+function fitPoints(pts: Pt[], t1: Pt, t2: Pt, tol: number, depth = 0): Seg[] {
+  const P0 = pts[0];
+  const P3 = pts[pts.length - 1];
+  const chord = len(sub(P3, P0));
+  if (pts.length <= 2) {
+    const h = chord / 3;
+    return [{ c: true, p0: P0, p1: add(P0, mul(t1, h)), p2: add(P3, mul(t2, h)), p3: P3 }];
+  }
+  const u: number[] = [0];
+  for (let k = 1; k < pts.length; k++) u.push(u[k - 1] + len(sub(pts[k], pts[k - 1])));
+  const total = u[u.length - 1];
+  if (total < 1e-9) return [line(P0, P3)];
+  for (let k = 0; k < u.length; k++) u[k] /= total;
+
+  let cur: Seg | null = null;
+  for (let it = 0; it < 4; it++) {
+    cur = solve(pts, u, P0, P3, t1, t2, total);
+    if (!cur) break;
+    for (let k = 1; k < pts.length - 1; k++) {
+      const t = u[k];
+      const d = sub(bez(cur, t), pts[k]);
+      const d1 = bezD1(cur, t);
+      const den = dot(d1, d1) + dot(d, bezD2(cur, t));
+      if (Math.abs(den) > 1e-12) u[k] = Math.min(1, Math.max(0, t - dot(d, d1) / den));
+    }
+  }
+  if (!cur) return [line(P0, P3)];
+
+  const N = 40;
+  const curve: Pt[] = [];
+  for (let k = 0; k <= N; k++) curve.push(bez(cur, k / N));
+  let maxErr = 0;
+  let at = Math.floor(pts.length / 2);
+  for (let k = 1; k < pts.length - 1; k++) {
+    let md = Infinity;
+    for (let q = 0; q < curve.length - 1; q++) {
+      const a = curve[q];
+      const ab = sub(curve[q + 1], a);
+      const l2 = dot(ab, ab);
+      const t = l2 > 0 ? Math.min(1, Math.max(0, dot(sub(pts[k], a), ab) / l2)) : 0;
+      const d = len(sub(pts[k], add(a, mul(ab, t))));
+      if (d < md) md = d;
+    }
+    if (md > maxErr) {
+      maxErr = md;
+      at = k;
+    }
+  }
+  if (maxErr <= tol || depth >= 5 || pts.length < 6) return [cur];
+  const w = Math.min(6, at, pts.length - 1 - at);
+  const tc = unit(sub(pts[at + w], pts[at - w])) ?? t1;
+  return [...fitPoints(pts.slice(0, at + 1), t1, mul(tc, -1), tol, depth + 1), ...fitPoints(pts.slice(at), tc, t2, tol, depth + 1)];
+}
+
+/**
+ * Cari tepi yang seharusnya lurus langsung dari titik-titik padat kontur (tahan terhadap tepi yang
+ * terpecah jadi banyak kurva kecil bergelombang). Tepi jadi garis lurus (datar/tegak dikunci persis),
+ * sudut tajam dibentuk dari titik potong dua garis, sisanya difit ulang sebagai kurva mulus.
+ * Mengembalikan null bila tidak ada garis lurus (pakai penggabung kurva biasa).
+ */
+function snapLines(segs: Seg[], tol: number): Seg[] | null {
+  const STEP = 1;
+  const P = flatten(segs, STEP);
+  const N = P.length;
+  if (N < 12) return null;
+  const dTol = tol * 0.8;
+  const minLen = tol * 12;
+  const cornerMax = tol * 14;
+  const strongLen = tol * 30; // garis tanpa sudut di ujungnya harus cukup panjang, kalau tidak itu lengkung
+
+  // titik awal: paling jauh dari pusat (hampir pasti bukan di tengah tepi lurus)
+  let cx = 0;
+  let cy = 0;
+  for (const q of P) {
+    cx += q.x;
+    cy += q.y;
+  }
+  cx /= N;
+  cy /= N;
+  let s0 = 0;
+  let far = -1;
+  for (let k = 0; k < N; k++) {
+    const d = (P[k].x - cx) ** 2 + (P[k].y - cy) ** 2;
+    if (d > far) {
+      far = d;
+      s0 = k;
+    }
+  }
+
+  const runs: Run[] = [];
+  let pos = s0;
+  const end = s0 + N;
+  while (pos < end) {
+    let best = -1;
+    for (let j = pos + 2; j <= end; j++) {
+      const st = lineStats(P, pos, j);
+      if (st.dev > dTol) break;
+      // lengkung landai (sisi tunggal & cukup menyimpang) bukan garis: jangan dipoligonkan
+      const bow = chordBow(P, pos, j);
+      if (bow.dev > tol * 0.08 && bow.oneSided > 0.9) continue;
+      best = j;
+    }
+    if (best > 0 && len(sub(P[best % N], P[pos % N])) >= minLen) {
+      runs.push(fitLineRun(P, pos, best));
+      pos = best;
+    } else pos++;
+  }
+  if (!runs.length) return null;
+
+  // Gabungkan garis berurutan yang segaris (terpecah oleh goyangan kecil)
+  for (let r = 0; r + 1 < runs.length; ) {
+    const A = runs[r];
+    const B = runs[r + 1];
+    const da = unit(sub(A.b, A.a));
+    const db = unit(sub(B.b, B.a));
+    if (
+      da &&
+      db &&
+      len(sub(B.a, A.b)) <= cornerMax &&
+      dot(da, db) >= Math.cos((4 * Math.PI) / 180) &&
+      distLine(B.a, A.a, A.b) <= dTol &&
+      distLine(A.b, B.a, B.b) <= dTol
+    ) {
+      runs.splice(r, 2, fitLineRun(P, A.i, B.j));
+    } else r++;
+  }
+
+  // Saring: garis pendek tanpa sudut di ujung = potongan lengkung (lingkaran jangan jadi poligon)
+  const COS_C = Math.cos((30 * Math.PI) / 180);
+  const COS_H = Math.cos((140 * Math.PI) / 180);
+  const dirR = (r: Run) => unit(sub(r.b, r.a)) ?? { x: 1, y: 0 };
+  const cornerBetween = (A: Run, B: Run) => {
+    if (len(sub(B.a, A.b)) > cornerMax) return false;
+    const cs = dot(dirR(A), dirR(B));
+    return cs <= COS_C && cs >= COS_H;
+  };
+  const smoothAdj = (A: Run, B: Run) => len(sub(B.a, A.b)) <= cornerMax && dot(dirR(A), dirR(B)) > COS_C;
+  const kept = runs.filter((r, idx) => {
+    const L = len(sub(r.b, r.a));
+    const prev = runs[(idx + runs.length - 1) % runs.length];
+    const next = runs[(idx + 1) % runs.length];
+    // rantai garis yang menyambung landai di kedua sisi = lengkung besar yang terpecah, bukan tepi lurus
+    if (runs.length >= 3 && L < tol * 60 && smoothAdj(prev, r) && smoothAdj(r, next)) return false;
+    if (L >= strongLen) return true;
+    if (runs.length < 2) return false;
+    return cornerBetween(prev, r) || cornerBetween(r, next);
+  });
+  if (!kept.length) return null;
+  runs.length = 0;
+  runs.push(...kept);
+
+  const R = runs.length;
+  if (R < 2) return null; // satu garis saja: kontur tidak bisa dibangun ulang dengan aman
+  const dirOf = (r: Run) => unit(sub(r.b, r.a)) ?? { x: 1, y: 0 };
+
+  // Sudut: dua garis berurutan dengan jarak pendek di antaranya -> titik potong
+  const joinCorner: boolean[] = new Array(R).fill(false); // join antara run r-1 dan r
+  for (let r = 0; r < R; r++) {
+    const A = runs[(r + R - 1) % R];
+    const B = runs[r];
+    if (R === 1) break;
+    const da = dirOf(A);
+    const db = dirOf(B);
+    const gap = len(sub(B.a, A.b));
+    if (gap > cornerMax) continue;
+    const cs = dot(da, db);
+    if (cs > COS_C || cs < COS_H) continue;
+    const cr = da.x * db.y - da.y * db.x;
+    if (Math.abs(cr) < 1e-6) continue;
+    const w = sub(B.a, A.a);
+    const t = (w.x * db.y - w.y * db.x) / cr;
+    const X = add(A.a, mul(da, t));
+    if (len(sub(X, A.b)) > cornerMax * 1.5 || len(sub(X, B.a)) > cornerMax * 1.5) continue;
+    joinCorner[r] = true;
+    A.b = X;
+    B.a = X;
+  }
+
+  const out: Seg[] = [];
+  for (let r = 0; r < R; r++) {
+    const A = runs[(r + R - 1) % R];
+    const B = runs[r];
+    if (!joinCorner[r]) {
+      // bagian antara garis: kurva halus dengan tangen = arah garis
+      const from = A.j;
+      let to = B.i;
+      if (to < from) to += N;
+      const mid: Pt[] = [];
+      const dA = dirOf(A);
+      const dB = dirOf(B);
+      for (let k = from + 1; k < to; k++) {
+        const q = P[k % N];
+        // buang titik yang masih "di dalam" garis (di belakang ujung A / melewati awal B)
+        if (dot(sub(q, A.b), dA) <= 0 || dot(sub(q, B.a), dB) >= 0) continue;
+        mid.push(q);
+      }
+      const part = [A.b, ...mid, B.a];
+      if (len(sub(B.a, A.b)) < 1e-6 && !mid.length) {
+        // menyatu
+      } else if (!mid.length) {
+        out.push(line(A.b, B.a));
+      } else {
+        out.push(...fitPoints(part, dirOf(A), mul(dirOf(B), -1), tol * 1.2));
+      }
+    }
+    out.push(line(B.a, B.b));
+  }
+  // potongan kurva kecil hasil fit digabung lagi bila sambungannya mulus
+  const result = mergeCurves(out, tol);
+
+  // Pengaman: hasil tidak boleh menyimpang dari kontur asli (bila ya, pakai jalur biasa)
+  const Q = flatten(result, 2);
+  if (Q.length < 3) return null;
+  for (let k = 0; k < N; k += 3) {
+    let md = Infinity;
+    for (let q = 0; q < Q.length; q++) {
+      const a = Q[q];
+      const b = Q[(q + 1) % Q.length];
+      const ab = sub(b, a);
+      const l2 = dot(ab, ab);
+      const t = l2 > 0 ? Math.min(1, Math.max(0, dot(sub(P[k], a), ab) / l2)) : 0;
+      const d = len(sub(P[k], add(a, mul(ab, t))));
+      if (d < md) md = d;
+      if (md <= tol * 2) break;
+    }
+    if (md > tol * 2) return null;
+  }
+  return result;
+}
+
 /** Tahap: rapikan garis/sudut dulu, lalu gabung kurva sisanya, lalu rapikan lagi */
 function simplifySub(segs: Seg[], tol: number): Seg[] {
+  const snapped = snapLines(segs, tol);
+  if (snapped) return snapped;
   return straighten(mergeCurves(straighten(segs, tol), tol), tol);
 }
 
