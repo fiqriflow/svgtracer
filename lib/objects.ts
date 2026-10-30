@@ -27,18 +27,6 @@ function dist(a: number, b: number) {
   return Math.hypot((a >> 16) - (b >> 16), ((a >> 8) & 255) - ((b >> 8) & 255), (a & 255) - (b & 255));
 }
 
-function skinTone(c: number) {
-  const r = c >> 16;
-  const g = (c >> 8) & 255;
-  const b = c & 255;
-  const mx = Math.max(r, g, b);
-  const mn = Math.min(r, g, b);
-  if (mx < 120 || mx === mn) return false;
-  const s = (mx - mn) / mx;
-  const h = mx === r ? ((g - b) / (mx - mn)) * 60 : 0;
-  return mx === r && h >= 5 && h <= 42 && s >= 0.18 && s <= 0.7;
-}
-
 export function groupObjects(
   rk: Int16Array,
   ranked: number[],
@@ -119,7 +107,7 @@ export function groupObjects(
     ranks.forEach((r) => (objOfRank[r] = z));
     const isBg = ri === bgIdx;
     const isBase = z === (bgIdx >= 0 ? 1 : 0);
-    const name = isBg ? "latar" : skinTone(ranked[base]) ? "kulit-badan" : `objek-${++objN}-${hexOf(ranked[base])}`;
+    const name = isBg ? "latar" : isBase ? "badan-utama" : `objek-${++objN}-${hexOf(ranked[base])}`;
     return { z, ranks, area: raw.area, isBg, isBase, name };
   });
   return { groups, objOfRank };

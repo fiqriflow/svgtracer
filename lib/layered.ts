@@ -498,10 +498,39 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   }
 
   // Setelah penggabungan: hitung ulang warna ke rata-rata piksel sebenarnya
-  const refined = refinePalette(px, ch, palette);
+  let refined = refinePalette(px, ch, palette);
   palette.length = 0;
   palette.push(...refined.map(snapNeutral));
   ids = assignPalette(px, ch, palette);
+
+  // Penghalusan rata-rata dapat membuat dua warna yang tadinya terpisah jadi nyaris kembar
+  // (mis. #ee925b dan #f0935a). Gabungkan lagi, kalau tidak muncul pulau/garis seam tipis di
+  // tengah area datar.
+  {
+    const cnt2 = new Array<number>(palette.length).fill(0);
+    for (let i = 0; i < N0; i++) if (ids[i] >= 0) cnt2[ids[i]]++;
+    const order = palette.map((_, i) => i).sort((a, b) => cnt2[b] - cnt2[a]);
+    const keep2: number[] = [];
+    for (const i of order) {
+      const c = palette[i];
+      const twin = keep2.some((k) => {
+        const dr = (c >> 16) - (k >> 16);
+        const dg = ((c >> 8) & 255) - ((k >> 8) & 255);
+        const db = (c & 255) - (k & 255);
+        return dr * dr + dg * dg + db * db < 8 * 8;
+      });
+      if (!twin) keep2.push(c);
+    }
+    if (keep2.length < palette.length && keep2.length >= 2) {
+      palette.length = 0;
+      palette.push(...keep2);
+      ids = assignPalette(px, ch, palette);
+      refined = refinePalette(px, ch, palette);
+      palette.length = 0;
+      palette.push(...refined.map(snapNeutral));
+      ids = assignPalette(px, ch, palette);
+    }
+  }
 
   // Luas pembersihan diskalakan dengan ukuran gambar (dasar = 250 ribu piksel)
   const cleanArea = Math.round((o.cleanArea ?? 0) * Math.max(1, Math.sqrt(N0 / 250000)));
