@@ -415,7 +415,21 @@ const hex = (n: number) => "#" + n.toString(16).padStart(6, "0");
  * Hasilnya: tepi mulus tanpa gerigi / goyang, sudut dan detail kecil tetap tajam.
  */
 export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<string> {
-  const meta = await sharp(input).metadata();
+  let meta = await sharp(input).metadata();
+  // Gambar kecil (< 900 px): perbesar dulu supaya garis tipis 1-2 px (jaring, tali, outline)
+  // tidak termakan median/penghalus derau. Parameter lain disesuaikan agar hasil setara.
+  const long0 = Math.max(meta.width ?? 0, meta.height ?? 0);
+  const up = long0 > 0 && long0 < 900 ? Math.min(3, Math.ceil(1100 / long0)) : 1;
+  const outW = meta.width ?? 0;
+  const outH = meta.height ?? 0;
+  if (up > 1) {
+    input = await sharp(input)
+      .resize(outW * up, outH * up, { kernel: "lanczos3" })
+      .png()
+      .toBuffer();
+    o = { ...o, scale: o.scale / up, blur: o.blur * up, collar: (o.collar ?? 0) * up, openClose: (o.openClose ?? 0) * up };
+    meta = await sharp(input).metadata();
+  }
   const W0 = meta.width ?? 0;
   const H0 = meta.height ?? 0;
   if (!W0 || !H0) throw new Error("Gambar tidak valid.");
@@ -582,6 +596,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   if (o.objects) {
     const { groups, objOfRank } = groupObjects(rk, ranked, W0, H0);
     const closeR = Math.max(2, Math.round(Math.max(W0, H0) * 0.015));
+    const under = Math.max(2, Math.round(Math.max(W0, H0) * 0.004));
     let svgLayers = "";
     for (const g of groups) {
       const li = new Int16Array(ranked.length).fill(-1);
@@ -589,7 +604,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       let inner = "";
       for (let k = 0; k < g.ranks.length; k++) {
         let zone: Uint8Array | null = null;
-        if (k === 0 && !g.isBg) zone = dilateMask(extensionMask(rk, objOfRank, g.z, W0, H0, g.isBase, closeR), W0, H0, 1);
+        if (k === 0 && !g.isBg) zone = dilateMask(extensionMask(rk, objOfRank, g.z, W0, H0, g.isBase, closeR, under), W0, H0, 1);
         let count = 0;
         for (let i = 0; i < N0; i++) {
           let f = 0;
@@ -612,7 +627,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       }
       if (inner) svgLayers += `<g id="layer-${String(g.z + 1).padStart(2, "0")}-${g.name}" data-name="${g.name}">${inner}</g>`;
     }
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${svgLayers}</svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${outW}" height="${outH}" viewBox="0 0 ${w} ${h}">${svgLayers}</svg>`;
   }
 
   for (let r = 0; r < ranked.length; r++) {
@@ -639,7 +654,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
     paths += await emit(field, hex(ranked[r]));
   }
 
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${paths}</svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${outW}" height="${outH}" viewBox="0 0 ${w} ${h}">${paths}</svg>`;
 }
 
 /** Hitam-putih: satu lapisan Potrace dari gambar grayscale yang dihaluskan */

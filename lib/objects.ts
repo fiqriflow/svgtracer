@@ -215,6 +215,7 @@ export function extensionMask(
   H: number,
   base: boolean,
   closeR: number,
+  under = 0,
 ): Uint8Array {
   const N = W * H;
   const own = new Uint8Array(N);
@@ -283,6 +284,13 @@ export function extensionMask(
     for (let i = 0; i < N; i++) inv[i] = dil[i] ? 0 : 1;
     const er = dilate(inv, W, H, closeR);
     for (let i = 0; i < N; i++) if (!er[i] && above[i]) ext[i] = 1;
+  }
+
+  // (d) tumpang-bawah: siluet menyelip beberapa px ke bawah objek di atasnya sepanjang batas bersama,
+  // sehingga tepi antar-objek tidak menyisakan celah tipis (latar mengintip)
+  if (under > 0) {
+    const dil = dilate(own, W, H, under);
+    for (let i = 0; i < N; i++) if (dil[i] && above[i]) ext[i] = 1;
   }
 
   // (c) objek dasar: siluet menyeluruh sampai ke bawah objek lain
