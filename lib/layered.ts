@@ -133,7 +133,7 @@ function addEnclosedIslands(rk: Int16Array, W: number, H: number, r: number, nea
  * Ini menghilangkan bercak yang timbul saat nilai piksel gradasi lembut/JPEG berayun di
  * sekitar batas dua warna palet yang mirip.
  */
-function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, minArea: number, minAreaClose = 0, thinCap = 0): void {
+function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, minArea: number, minAreaClose = 0, thinCap = 0, thinR = 1): void {
   if (minArea <= 1) return;
   const closeTo = (a: number, b: number) => {
     const c = palette[a];
@@ -180,10 +180,10 @@ function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: num
     }
     if (!sm && thinCap > 0 && n < thinCap) {
       // Garis tipis (lebar <= 2 px) yang diapit dua warna lain = pinggiran noise JPEG, bukan bentuk
-      let interior = false;
+      let interiorN = 0;
       const hist = new Map<number, number>();
       let tot = 0;
-      for (let k = 0; k < n && !interior; k++) {
+      for (let k = 0; k < n; k++) {
         const i = queue[k];
         const x = i % W;
         const nb = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i >= W ? i - W : -1, i + W < N ? i + W : -1];
@@ -196,8 +196,12 @@ function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: num
             tot++;
           }
         }
-        if (same === 4) interior = true;
+        // "dalam" = piksel yang tetangganya sejauh thinR (px) ke empat arah masih sekelas;
+        // thinR mengikuti faktor pembesaran, jadi pinggiran transisi 1 px asli tetap dianggap tipis
+        if (same === 4 && (thinR <= 1 || (x >= thinR && x < W - thinR && i >= thinR * W && i + thinR * W < N && ids[i - thinR] === id && ids[i + thinR] === id && ids[i - thinR * W] === id && ids[i + thinR * W] === id))) interiorN++;
       }
+      // pembesaran: cincin transisi punya beberapa titik tebal, jadi toleransi 10% piksel "dalam"
+      const interior = thinR <= 1 ? interiorN > 0 : interiorN > 0.1 * n;
       if (!interior && tot > 0) {
         const counts = [...hist.values()].sort((a, b) => b - a);
         if (counts.length >= 2 && counts[1] >= tot * 0.25) sm = true;
@@ -423,8 +427,10 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const outW = meta.width ?? 0;
   const outH = meta.height ?? 0;
   if (up > 1) {
+    // kernel resize() hanya berlaku saat memperkecil; untuk memperbesar pakai interpolator nohalo
+    // (tanpa overshoot/ringing: tidak ada bingkai gelap atau halo terang di tepi kontras tinggi)
     input = await sharp(input)
-      .resize(outW * up, outH * up, { kernel: "lanczos3" })
+      .affine([up, 0, 0, up], { interpolator: sharp.interpolators.nohalo })
       .png()
       .toBuffer();
     o = { ...o, scale: o.scale / up, blur: o.blur * up, collar: (o.collar ?? 0) * up, openClose: (o.openClose ?? 0) * up };
@@ -499,11 +505,11 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
 
   // Luas pembersihan diskalakan dengan ukuran gambar (dasar = 250 ribu piksel)
   const cleanArea = Math.round((o.cleanArea ?? 0) * Math.max(1, Math.sqrt(N0 / 250000)));
-  const thinCap = Math.max(W0, H0) >= 900 ? 4000 : 0;
-  cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, 0, thinCap);
+  const thinCap = Math.max(W0, H0) >= 900 ? 4000 * up * up : 0;
+  cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, 0, thinCap, up);
   if ((o.closeSmooth ?? 0) > 0) {
     smoothCloseClasses(px, ch, ids, palette, W0, H0, Math.max(3, Math.round(Math.max(W0, H0) / 300)), 24, o.closeSmooth ?? 0);
-    cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, cleanArea * 12, thinCap);
+    cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, cleanArea * 12, thinCap, up);
     openCloseClasses(px, ch, ids, palette, W0, H0, Math.round(o.openClose ?? 0));
   }
 
@@ -670,7 +676,7 @@ export async function traceBlackWhite(
   const h = Math.round(H0 * o.scale);
   const png = await sharp(input)
     .flatten({ background: "#ffffff" })
-    .resize(w, h, { kernel: "lanczos3" })
+    .resize(w, h, { kernel: "mitchell" })
     .greyscale()
     .blur(Math.max(0.3, o.blur))
     .png()
