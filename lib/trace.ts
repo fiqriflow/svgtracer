@@ -15,6 +15,8 @@ export type TraceSettings = {
   threshold: number;
   /** Bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (mode warna, metode Halus) */
   snap: boolean;
+  /** Susun hasil per objek (grup <g> berurutan z-index: latar, badan, baju, rambut, ...) (mode warna, metode Halus) */
+  layers: boolean;
 };
 
 /** Preset awal: karakter/maskot flat minimalis tanpa gradasi (metode Halus, 24 warna) */
@@ -26,6 +28,7 @@ export const DEFAULT_SETTINGS: TraceSettings = {
   smooth: 1.5,
   threshold: 128,
   snap: true,
+  layers: true,
 };
 
 export type TraceResult = { svg: string; bytes: number; paths: number; engine: string };

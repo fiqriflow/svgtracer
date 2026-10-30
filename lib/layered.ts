@@ -5,6 +5,7 @@ import { edgeSmooth } from "./denoise";
 import { ellipseTag, snapEllipses } from "./shapes";
 import { simplifyTag } from "./simplify";
 import { traceField } from "./curvefit";
+import { extensionMask, groupObjects, dilateMask } from "./objects";
 
 export type LayeredOptions = {
   /** Jumlah warna palet (mode warna) */
@@ -43,6 +44,8 @@ export type LayeredOptions = {
   corner?: number;
   /** Toleransi warna penghalus penjaga tepi (default 28). Lebih kecil = bentuk kecil berkontras rendah (pipi, bayangan) lebih terjaga */
   denoiseTol?: number;
+  /** Susun hasil jadi layer per objek (badan, baju, rambut, ...) dengan urutan z-index; tiap objek = grup <g> */
+  objects?: boolean;
   /** Toleransi penyederhanaan kurva (px resolusi upscale): gabung segmen mulus, buang gelombang/simpul berlebih. 0 = mati */
   fit?: number;
 };
@@ -531,6 +534,87 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
   const sigma = Math.max(0.3, o.blur * o.scale);
   const field = Buffer.allocUnsafe(N0);
   let paths = "";
+
+  /** medan (gelap = isi) -> kurva SVG berwarna `color` */
+  const emit = async (field: Buffer, color: string): Promise<string> => {
+    let out = "";
+    const big = await sharp(field, { raw: { width: W0, height: H0, channels: 1 } })
+      .resize(w, h, { kernel: "cubic" })
+      .toColourspace("b-w") // paksa 1 kanal (default sharp: 3 kanal)
+      .raw()
+      .toBuffer();
+    const blurred = await sharp(big, { raw: { width: w, height: h, channels: 1 } })
+      .blur(sigma)
+      .toColourspace("b-w")
+      .raw()
+      .toBuffer();
+    // Bentuk bulat/lonjong -> elips sempurna; sisanya lewat Potrace
+    const shapes = o.snap ? snapEllipses(blurred, w, h, { minArea: 20 * o.scale * o.scale }) : [];
+    if ((o.tracer ?? "own") === "own") {
+      const d = traceField(blurred, w, h, {
+        turd: o.turd * 10, // bentuk/lubang mungil (titik sisa) dibuang
+        err: o.fitErr ?? 0.8,
+        corner: o.corner ?? 50,
+        win: 3 + 1.2 * o.scale,
+        smooth: o.curveSmooth ?? 6,
+      });
+      if (d) out += `<path d="${d}" fill="${color}" fill-rule="evenodd" stroke="none"/>`;
+    } else {
+      const png = await sharp(blurred, { raw: { width: w, height: h, channels: 1 } })
+        .toColourspace("b-w")
+        .png()
+        .toBuffer();
+      const p = await loadTrace(png, {
+        threshold: 128,
+        blackOnWhite: true,
+        turdSize: o.turd,
+        optTolerance: o.opt,
+        alphaMax: o.alphaMax ?? 1,
+        optCurve: true,
+      });
+      const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0, false);
+      if (!tag.includes(' d=""')) out += tag;
+    }
+    for (const e of shapes) out += ellipseTag(e, color);
+    return out;
+  };
+
+  if (o.objects) {
+    const { groups, objOfRank } = groupObjects(rk, ranked, W0, H0);
+    const closeR = Math.max(2, Math.round(Math.max(W0, H0) * 0.015));
+    let svgLayers = "";
+    for (const g of groups) {
+      const li = new Int16Array(ranked.length).fill(-1);
+      g.ranks.forEach((r, k) => (li[r] = k));
+      let inner = "";
+      for (let k = 0; k < g.ranks.length; k++) {
+        let zone: Uint8Array | null = null;
+        if (k === 0 && !g.isBg) zone = dilateMask(extensionMask(rk, objOfRank, g.z, W0, H0, g.isBase, closeR), W0, H0, 1);
+        let count = 0;
+        for (let i = 0; i < N0; i++) {
+          let f = 0;
+          if (k === 0 && g.isBg) f = 255;
+          else {
+            const A = soft.a[i];
+            const B = soft.b[i];
+            const wb = soft.w[i];
+            const za = objOfRank[A];
+            const zb = objOfRank[B];
+            if (za === g.z ? li[A] >= k : zone !== null && zone[i] === 1 && za > g.z) f += 255 - wb;
+            if (wb > 0 && (zb === g.z ? li[B] >= k : zone !== null && zone[i] === 1 && zb > g.z)) f += wb;
+            f = (Math.min(255, f) * cover[i]) / 255;
+          }
+          if (f >= 128) count++;
+          field[i] = 255 - Math.round(f);
+        }
+        if (k > 0 && count * o.scale * o.scale <= o.turd) continue;
+        inner += await emit(field, hex(ranked[g.ranks[k]]));
+      }
+      if (inner) svgLayers += `<g id="layer-${String(g.z + 1).padStart(2, "0")}-${g.name}" data-name="${g.name}">${inner}</g>`;
+    }
+    return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${svgLayers}</svg>`;
+  }
+
   for (let r = 0; r < ranked.length; r++) {
     // Lapisan r = cakupan semua warna dengan peringkat >= r (tanpa celah antar warna)
     // Potrace: gelap (0) = isi, jadi medan dibalik
@@ -552,45 +636,7 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
       field[i] = 255 - Math.round(f);
     }
     if (count * o.scale * o.scale <= o.turd) continue;
-    const big = await sharp(field, { raw: { width: W0, height: H0, channels: 1 } })
-      .resize(w, h, { kernel: "cubic" })
-      .toColourspace("b-w") // paksa 1 kanal (default sharp: 3 kanal)
-      .raw()
-      .toBuffer();
-    const blurred = await sharp(big, { raw: { width: w, height: h, channels: 1 } })
-      .blur(sigma)
-      .toColourspace("b-w")
-      .raw()
-      .toBuffer();
-    const color = hex(ranked[r]);
-    // Bentuk bulat/lonjong -> elips sempurna; sisanya lewat Potrace
-    const shapes = o.snap ? snapEllipses(blurred, w, h, { minArea: 20 * o.scale * o.scale }) : [];
-    if ((o.tracer ?? "own") === "own") {
-      const d = traceField(blurred, w, h, {
-        turd: o.turd * 10, // bentuk/lubang mungil (titik sisa) dibuang
-        err: o.fitErr ?? 0.8,
-        corner: o.corner ?? 50,
-        win: 3 + 1.2 * o.scale,
-        smooth: o.curveSmooth ?? 6,
-      });
-      if (d) paths += `<path d="${d}" fill="${color}" fill-rule="evenodd" stroke="none"/>`;
-    } else {
-      const png = await sharp(blurred, { raw: { width: w, height: h, channels: 1 } })
-        .toColourspace("b-w")
-        .png()
-        .toBuffer();
-      const p = await loadTrace(png, {
-        threshold: 128,
-        blackOnWhite: true,
-        turdSize: o.turd,
-        optTolerance: o.opt,
-        alphaMax: o.alphaMax ?? 1,
-        optCurve: true,
-      });
-      const tag = simplifyTag(p.getPathTag(color), o.fit ?? 0, false);
-      if (!tag.includes(' d=""')) paths += tag;
-    }
-    for (const e of shapes) paths += ellipseTag(e, color);
+    paths += await emit(field, hex(ranked[r]));
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${W0}" height="${H0}" viewBox="0 0 ${w} ${h}">${paths}</svg>`;

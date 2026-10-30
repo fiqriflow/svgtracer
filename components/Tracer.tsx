@@ -312,6 +312,19 @@ export default function Tracer() {
                   </span>
                 </label>
               )}
+              {settings.mode === "color" && (
+                <label className="flex items-center gap-2 text-sm sm:col-span-2">
+                  <input
+                    type="checkbox"
+                    checked={settings.layers}
+                    onChange={(e) => set("layers", e.target.checked)}
+                  />
+                  <span>
+                    <span className="font-medium">Layer per objek</span>
+                    <span className="text-mute"> — badan di belakang, lalu baju, rambut, mata, kacamata (grup berurutan z-index)</span>
+                  </span>
+                </label>
+              )}
               {SLIDERS.filter((sl) => sl.modes.includes(settings.mode)).map((sl) => (
                 <div key={sl.key}>
                   <label htmlFor={sl.key} className="flex items-baseline justify-between text-sm font-medium">

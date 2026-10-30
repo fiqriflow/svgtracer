@@ -76,6 +76,8 @@ export async function POST(req: Request) {
           fit: fitColor,
           // bentuk bulat/lonjong dijadikan lingkaran/elips sempurna (default aktif)
           snap: s.snap !== false,
+          // susun per objek (badan, baju, rambut, ...) sebagai grup <g> berurutan z-index
+          objects: s.layers !== false,
           denoise: true,
           mergeDist: 10,
           denoiseTol: 22,
