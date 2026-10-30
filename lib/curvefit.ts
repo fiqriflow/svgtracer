@@ -16,7 +16,7 @@ export type FitOptions = {
   corner: number;
   /** Jarak pengamatan sudut (px medan) */
   win: number;
-  /** Jumlah lintasan penghalusan kontur ([1 2 1]/4, melingkar) sebelum dicocokkan */
+  /** Jumlah pasangan lintasan penghalusan Taubin per ruas sebelum dicocokkan */
   smooth?: number;
 };
 
@@ -321,8 +321,56 @@ function smoothClosed(pts: P[], passes: number): P[] {
   return cur;
 }
 
+/** Resampel kontur tertutup ke jarak titik seragam `step` (px medan) */
+function resampleClosed(pts: P[], step: number): P[] {
+  const n = pts.length;
+  const cum = [0];
+  for (let i = 0; i < n; i++) cum.push(cum[i] + len(sub(pts[(i + 1) % n], pts[i])));
+  const total = cum[n];
+  const m = Math.max(8, Math.round(total / step));
+  const out: P[] = [];
+  let j = 0;
+  for (let k = 0; k < m; k++) {
+    const d = (k * total) / m;
+    while (j < n - 1 && cum[j + 1] < d) j++;
+    const seg = cum[j + 1] - cum[j] || 1;
+    const t = (d - cum[j]) / seg;
+    const a = pts[j];
+    const b = pts[(j + 1) % n];
+    out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  }
+  return out;
+}
+
+const TAU_L = 0.6307;
+const TAU_M = -0.6732;
+
+/**
+ * Penghalusan Taubin (lambda|mu): meredam riak berpanjang gelombang pendek TANPA mengecilkan
+ * bentuk. closed=false -> dua ujung dikunci (titik sudut tidak bergeser).
+ */
+function taubin(pts: P[], pairs: number, closed: boolean): P[] {
+  const n = pts.length;
+  if (pairs <= 0 || n < 5) return pts;
+  let cur = pts.map((p) => ({ x: p.x, y: p.y }));
+  const lo = closed ? 0 : 1;
+  const hi = closed ? n : n - 1;
+  for (let it = 0; it < pairs * 2; it++) {
+    const f = it % 2 === 0 ? TAU_L : TAU_M;
+    const nx = cur.map((p) => ({ x: p.x, y: p.y }));
+    for (let i = lo; i < hi; i++) {
+      const a = cur[(i + n - 1) % n];
+      const c = cur[(i + 1) % n];
+      nx[i] = { x: cur[i].x + f * (0.5 * (a.x + c.x) - cur[i].x), y: cur[i].y + f * (0.5 * (a.y + c.y) - cur[i].y) };
+    }
+    cur = nx;
+  }
+  return cur;
+}
+
 function contourToPath(raw: P[], o: FitOptions): string {
-  const pts = smoothClosed(raw, o.smooth ?? 0);
+  // Resampel seragam + penghalusan ringan untuk deteksi sudut yang stabil
+  const pts = smoothClosed(resampleClosed(raw, 1), 3);
   const n = pts.length;
   const seg = new Array<number>(n);
   const cum = new Array<number>(n + 1);
@@ -388,23 +436,78 @@ function contourToPath(raw: P[], o: FitOptions): string {
   const tanLen = o.win * 0.8;
   const beziers: Bez[] = [];
   if (corners.length === 0) {
-    const ext: P[] = pts.concat([pts[0]]);
-    const a = unit(sub(pts[stepIdx(0, tanLen, 1)], pts[stepIdx(0, tanLen, -1)]));
+    const sm = taubin(pts, o.smooth ?? 0, true);
+    const ext: P[] = sm.concat([sm[0]]);
+    const a = unit(sub(sm[stepIdx(0, tanLen, 1) % sm.length], sm[stepIdx(0, tanLen, -1) % sm.length]));
     fitCubic(ext, a, mul(a, -1), o.err * o.err, beziers);
   } else {
+    // Ruas-ruas di antara sudut
+    const pieces: P[][] = [];
     for (let k = 0; k < corners.length; k++) {
-      const s = corners[k];
-      const e = corners[(k + 1) % corners.length];
-      const sl: P[] = [pts[s]];
-      let i = s;
+      const s0 = corners[k];
+      const e0 = corners[(k + 1) % corners.length];
+      const sl: P[] = [pts[s0]];
+      let i = s0;
       do {
         i = (i + 1) % n;
         sl.push(pts[i]);
-      } while (i !== e);
+      } while (i !== e0);
+      pieces.push(sl);
+    }
+    const cumOf = (sl: P[]) => {
+      const cl: number[] = [0];
+      for (let q = 1; q < sl.length; q++) cl.push(cl[q - 1] + len(sub(sl[q], sl[q - 1])));
+      return cl;
+    };
+    const atOf = (sl: P[], cl: number[], d: number) => {
+      let q = 0;
+      while (q < cl.length - 1 && cl[q] < d) q++;
+      return sl[q];
+    };
+    // Penajaman sudut: blur membuat sudut mundur sedikit. Ganti titik sudut dengan perpotongan
+    // garis sisi masuk dan keluar (geser maksimum 3 px medan).
+    const K = pieces.length;
+    const vertex: P[] = corners.map((c) => pts[c]);
+    for (let k = 0; k < K; k++) {
+      const outP = pieces[k];
+      const inP = pieces[(k + K - 1) % K];
+      const co = cumOf(outP);
+      const ci = cumOf(inP);
+      const Lo = co[co.length - 1];
+      const Li = ci[ci.length - 1];
+      if (Lo < o.win * 5 || Li < o.win * 5) continue;
+      const a1 = atOf(outP, co, o.win);
+      const b1 = atOf(outP, co, 3 * o.win);
+      const a2 = atOf(inP, ci, Li - 3 * o.win);
+      const b2 = atOf(inP, ci, Li - o.win);
+      const d1 = unit(sub(b1, a1));
+      const d2 = unit(sub(b2, a2));
+      const cr = d1.x * d2.y - d1.y * d2.x;
+      if (Math.abs(cr) < 0.25) continue; // hampir sejajar
+      const w0 = sub(a2, a1);
+      const t = (w0.x * d2.y - w0.y * d2.x) / cr;
+      const v = add(a1, mul(d1, t));
+      if (len(sub(v, pts[corners[k]])) <= 3) vertex[k] = v;
+    }
+    for (let k = 0; k < K; k++) {
+      pieces[k][0] = vertex[k];
+      pieces[(k + K - 1) % K][pieces[(k + K - 1) % K].length - 1] = vertex[k];
+    }
+    for (let k = 0; k < K; k++) {
+      let sl = pieces[k];
       if (sl.length < 2) continue;
-      const m = Math.min(sl.length - 1, Math.max(1, Math.round(tanLen)));
-      const t1 = unit(sub(sl[Math.min(sl.length - 1, m)], sl[0]));
-      const t2 = unit(sub(sl[Math.max(0, sl.length - 1 - m)], sl[sl.length - 1]));
+      sl = taubin(sl, o.smooth ?? 0, false);
+      const cl = cumOf(sl);
+      const L = cl[cl.length - 1];
+      let t1: P;
+      let t2: P;
+      if (L >= o.win * 5) {
+        t1 = unit(sub(atOf(sl, cl, 3 * o.win), atOf(sl, cl, o.win)));
+        t2 = unit(sub(atOf(sl, cl, L - 3 * o.win), atOf(sl, cl, L - o.win)));
+      } else {
+        t1 = unit(sub(sl[sl.length - 1], sl[0]));
+        t2 = mul(t1, -1);
+      }
       fitCubic(sl, t1, t2, o.err * o.err, beziers);
     }
   }
@@ -420,7 +523,7 @@ function contourToPath(raw: P[], o: FitOptions): string {
       const ny = ch.x / cl;
       const d1 = Math.abs((b[1].x - b[0].x) * nx + (b[1].y - b[0].y) * ny);
       const d2 = Math.abs((b[2].x - b[0].x) * nx + (b[2].y - b[0].y) * ny);
-      straight = d1 < 0.35 && d2 < 0.35;
+      straight = d1 < 0.5 && d2 < 0.5;
     }
     d += straight
       ? `L${fmt(b[3].x)} ${fmt(b[3].y)}`

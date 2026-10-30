@@ -130,7 +130,7 @@ function addEnclosedIslands(rk: Int16Array, W: number, H: number, r: number, nea
  * Ini menghilangkan bercak yang timbul saat nilai piksel gradasi lembut/JPEG berayun di
  * sekitar batas dua warna palet yang mirip.
  */
-function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, minArea: number, minAreaClose = 0): void {
+function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: number[], W: number, H: number, minArea: number, minAreaClose = 0, thinCap = 0): void {
   if (minArea <= 1) return;
   const closeTo = (a: number, b: number) => {
     const c = palette[a];
@@ -174,6 +174,31 @@ function cleanSpeckles(px: Uint8Array, ch: number, ids: Int16Array, palette: num
         }
       }
       sm = tot > 0 && cl / tot >= 0.6;
+    }
+    if (!sm && thinCap > 0 && n < thinCap) {
+      // Garis tipis (lebar <= 2 px) yang diapit dua warna lain = pinggiran noise JPEG, bukan bentuk
+      let interior = false;
+      const hist = new Map<number, number>();
+      let tot = 0;
+      for (let k = 0; k < n && !interior; k++) {
+        const i = queue[k];
+        const x = i % W;
+        const nb = [x > 0 ? i - 1 : -1, x < W - 1 ? i + 1 : -1, i >= W ? i - W : -1, i + W < N ? i + W : -1];
+        let same = 0;
+        for (const j of nb) {
+          if (j < 0) continue;
+          if (ids[j] === id) same++;
+          else if (ids[j] >= 0) {
+            hist.set(ids[j], (hist.get(ids[j]) ?? 0) + 1);
+            tot++;
+          }
+        }
+        if (same === 4) interior = true;
+      }
+      if (!interior && tot > 0) {
+        const counts = [...hist.values()].sort((a, b) => b - a);
+        if (counts.length >= 2 && counts[1] >= tot * 0.25) sm = true;
+      }
     }
     isSmall.push(sm);
     if (sm) for (let k = 0; k < n; k++) small.push(queue[k]);
@@ -457,10 +482,11 @@ export async function traceLayered(input: Buffer, o: LayeredOptions): Promise<st
 
   // Luas pembersihan diskalakan dengan ukuran gambar (dasar = 250 ribu piksel)
   const cleanArea = Math.round((o.cleanArea ?? 0) * Math.max(1, Math.sqrt(N0 / 250000)));
-  cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea);
+  const thinCap = Math.max(W0, H0) >= 900 ? 4000 : 0;
+  cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, 0, thinCap);
   if ((o.closeSmooth ?? 0) > 0) {
     smoothCloseClasses(px, ch, ids, palette, W0, H0, Math.max(3, Math.round(Math.max(W0, H0) / 300)), 24, o.closeSmooth ?? 0);
-    cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, cleanArea * 12);
+    cleanSpeckles(px, ch, ids, palette, W0, H0, cleanArea, cleanArea * 12, thinCap);
     openCloseClasses(px, ch, ids, palette, W0, H0, Math.round(o.openClose ?? 0));
   }
 

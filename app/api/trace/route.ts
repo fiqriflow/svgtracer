@@ -84,9 +84,9 @@ export async function POST(req: Request) {
           closeSmooth: 2,
           tracer: "own",
           // toleransi & penghalusan kurva ikut skala (sumber beresolusi rendah punya anak tangga piksel lebih lebar)
-          fitErr: 0.5 + 0.75 * scale,
+          fitErr: scale * (0.1 + 0.45 * scale),
           corner: 50,
-          curveSmooth: Math.round(8 * scale - 2),
+          curveSmooth: Math.round(6 + 4 * scale),
         });
       } else {
         engine = "detail";
